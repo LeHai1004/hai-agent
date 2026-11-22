@@ -1,3 +1,4 @@
+import time
 import json
 import os
 from datetime import date
@@ -76,8 +77,14 @@ def to_contents(messages):
 
 
 def web_search(query, n=5):
-    return list(DDGS().text(query, max_results=n))
-
+    last_error = None
+    for _ in range(3):
+        try:
+            return list(DDGS(timeout=15).text(query, max_results=n))
+        except Exception as e:
+            last_error = e
+            time.sleep(1)
+    raise last_error
 
 def build_prompt(question, results):
     blocks = []
@@ -94,19 +101,18 @@ def build_prompt(question, results):
         f"Kết quả tìm kiếm:\n{context}\n\nCâu hỏi: {question}"
     )
 
-
-def ask(client, messages, text):
+def ask(client, messages, text, use_history=True):
+    history = to_contents(messages) if use_history else []
     last_error = None
     for model in MODELS:
         try:
-            chat = client.chats.create(model=model, history=to_contents(messages))
+            chat = client.chats.create(model=model, history=history)
             reply = chat.send_message(text)
             return reply.text, model, reply.usage_metadata
         except Exception as e:
             last_error = e
             print(f"  [{model}] lỗi, thử model khác: {str(e)[:120]}")
     raise last_error
-
 
 def main():
     api_key = os.environ.get("GEMINI_API_KEY")
@@ -155,9 +161,14 @@ def main():
             sources = [(r.get("title", ""), r.get("href", "")) for r in results]
 
         try:
-            answer, model, meta = ask(client, messages, prompt)
+            answer, model, meta = ask(client, messages, prompt, use_history=not sources)
             messages.append({"role": "user", "text": question})
-            messages.append({"role": "model", "text": answer})
+            saved = answer
+            if sources:
+                saved += "\n\nNguồn:\n" + "\n".join(
+                    f"[{i}] {t}: {u}" for i, (t, u) in enumerate(sources, 1)
+                )
+            messages.append({"role": "model", "text": saved})
             save_history(messages)
             record_usage(usage, model, meta)
             print(f"Bot ({model}): {answer}\n")
