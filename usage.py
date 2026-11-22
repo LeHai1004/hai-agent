@@ -32,6 +32,9 @@ def format_usage(usage, model):
     text = f"{model}: {entry['requests']} lượt, {entry['tokens']} token hôm nay"
     limit = LIMITS.get(model)
     if limit:
-        percent = entry["requests"] * 100 // limit
-        text += f" ({entry['requests']}/{limit} lượt, {percent}%)"
+        used = entry["requests"]
+        percent = min(used * 100 // limit, 100)
+        filled = percent // 10
+        bar = "█" * filled + "░" * (10 - filled)
+        text += f" [{bar}] {used}/{limit} ({percent}%)"
     return text
