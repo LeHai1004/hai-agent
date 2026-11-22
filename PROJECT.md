@@ -30,5 +30,7 @@ Tự xây chatbot/agent riêng, dùng hằng ngày, không lo hết lượt.
 - Tool file chỉ làm việc trong workspace/ (chặn "..", đường dẫn tuyệt đối); write_file luôn hỏi y/n trước khi ghi
 - Thêm tool mới: tạo hàm Python có type hints + docstring trong tools/, thêm vào TOOLS
 - Lỗi đã gặp: Google Search tool báo 429/400 trên key miễn phí nên dùng DuckDuckGo; gemini-2.5-flash-lite đã bị gỡ
-- Việc tiếp theo: tạo file Word (.docx) bằng tool, import/export lịch sử chat
+- Việc tiếp theo: thanh tiến trình lượt dùng, tự chọn model theo câu hỏi, đọc repo GitHub rồi vẽ sơ đồ, giao diện đẹp hơn
 - Lưu ý: key Gemini miễn phí hết hạn mức ngày khá nhanh; bot tự chuyển model dự phòng
+- Tạo Word: tools/word.py (python-docx); thư viện ghi trong requirements.txt
+- /export tên: lưu chat ra exports/tên.json (để nạp lại) và tên.md (để dán sang chat khác); /import tên: nạp lại; /import (không tên): xem danh sách. Code ở transfer.py

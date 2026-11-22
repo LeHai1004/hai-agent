@@ -2,6 +2,7 @@ import os
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+from transfer import export_chat, import_chat, list_exports
 
 from config import MODELS
 from history import load_history, save_history
@@ -44,6 +45,23 @@ def main():
             print()
             continue
 
+        if text.startswith("/export"):
+            json_path, md_path = export_chat(messages, text[7:])
+            print(f"Đã xuất: {json_path} và {md_path}\n")
+            continue
+        if text.startswith("/import"):
+            name = text[7:].strip()
+            if not name:
+                print("Các bản đã xuất: " + (", ".join(list_exports()) or "chưa có") + "\n")
+                continue
+            data, error = import_chat(name)
+            if error:
+                print(error + "\n")
+                continue
+            messages = data
+            save_history(messages)
+            print(f"Đã nạp {len(messages)} tin nhắn từ '{name}'.\n")
+            continue
         question = text
         prompt = text
         sources = []
