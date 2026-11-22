@@ -1,6 +1,7 @@
 import os
 from dotenv import load_dotenv
 from google import genai
+from google.genai import types
 
 from config import MODELS
 from history import load_history, save_history
@@ -16,8 +17,10 @@ def main():
     if not api_key:
         print("Chưa có GEMINI_API_KEY (kiểm tra file .env).")
         return
-
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(api_version="v1beta"),
+    )
     messages = load_history()
     usage = load_usage()
 
