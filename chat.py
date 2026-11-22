@@ -8,7 +8,8 @@ from google.genai import types
 
 load_dotenv()
 
-MODEL = "gemini-3.5-flash"
+# Thử lần lượt từ trên xuống, model nào lỗi thì chuyển sang model kế
+MODELS = ["gemini-3.5-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
 HISTORY_FILE = Path("history") / "current.json"
 
 
@@ -32,6 +33,19 @@ def to_contents(messages):
     ]
 
 
+def ask(client, messages, text):
+    last_error = None
+    for model in MODELS:
+        try:
+            chat = client.chats.create(model=model, history=to_contents(messages))
+            reply = chat.send_message(text)
+            return reply.text, model
+        except Exception as e:
+            last_error = e
+            print(f"  [{model}] lỗi, thử model khác: {str(e)[:120]}")
+    raise last_error
+
+
 def main():
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
@@ -40,9 +54,8 @@ def main():
 
     client = genai.Client(api_key=api_key)
     messages = load_history()
-    chat = client.chats.create(model=MODEL, history=to_contents(messages))
 
-    print(f"Chatbot ({MODEL}). Đã nạp {len(messages)} tin nhắn cũ.")
+    print(f"Chatbot. Đã nạp {len(messages)} tin nhắn cũ.")
     print("Gõ '/new' để cuộc chat mới, 'exit' để thoát.\n")
     while True:
         text = input("Bạn: ").strip()
@@ -53,17 +66,16 @@ def main():
         if text == "/new":
             messages = []
             save_history(messages)
-            chat = client.chats.create(model=MODEL)
             print("Đã bắt đầu cuộc chat mới.\n")
             continue
         try:
-            reply = chat.send_message(text)
+            answer, model = ask(client, messages, text)
             messages.append({"role": "user", "text": text})
-            messages.append({"role": "model", "text": reply.text})
+            messages.append({"role": "model", "text": answer})
             save_history(messages)
-            print(f"Bot: {reply.text}\n")
+            print(f"Bot ({model}): {answer}\n")
         except Exception as e:
-            print(f"Lỗi: {e}\n")
+            print(f"Lỗi: tất cả model đều thất bại. {e}\n")
 
 
 if __name__ == "__main__":
