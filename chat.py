@@ -2,6 +2,7 @@ import os
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+from openai import OpenAI
 from transfer import export_chat, import_chat, list_exports
 
 from config import MODELS
@@ -14,14 +15,33 @@ load_dotenv()
 
 
 def main():
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        print("Chưa có GEMINI_API_KEY (kiểm tra file .env).")
+    gemini_api_key = os.environ.get("GEMINI_API_KEY")
+    groq_api_key = os.environ.get("GROQ_API_KEY")
+    openrouter_api_key = os.environ.get("OPENROUTER_API_KEY")
+
+    gemini_client = None
+    if gemini_api_key:
+        gemini_client = genai.Client(
+            api_key=gemini_api_key,
+            http_options=types.HttpOptions(api_version="v1beta"),
+        )
+
+    openai_clients = {}
+    if groq_api_key:
+        openai_clients["groq"] = OpenAI(
+            api_key=groq_api_key,
+            base_url="https://api.groq.com/openai/v1",
+        )
+    if openrouter_api_key:
+        openai_clients["openrouter"] = OpenAI(
+            api_key=openrouter_api_key,
+            base_url="https://openrouter.ai/api/v1",
+        )
+
+    if not gemini_client and not openai_clients:
+        print("Chưa có API key nào trong file .env (cần ít nhất GEMINI_API_KEY, GROQ_API_KEY hoặc OPENROUTER_API_KEY).")
         return
-    client = genai.Client(
-        api_key=api_key,
-        http_options=types.HttpOptions(api_version="v1beta"),
-    )
+
     messages = load_history()
     usage = load_usage()
 
@@ -40,8 +60,9 @@ def main():
             continue
         if text == "/usage":
             print(f"Lượt dùng ngày {usage['date']}:")
-            for m in MODELS:
-                print("  " + format_usage(usage, m))
+            for provider, model in MODELS:
+                pm = f"{provider}/{model}"
+                print("  " + format_usage(usage, pm))
             print()
             continue
 
@@ -79,7 +100,7 @@ def main():
             sources = [(r.get("title", ""), r.get("href", "")) for r in results]
 
         try:
-            answer, model, meta = ask(client, messages, prompt, use_history=not sources)
+            answer, model_key, meta = ask(gemini_client, openai_clients, messages, prompt, use_history=not sources)
             messages.append({"role": "user", "text": question})
             saved = answer
             if sources:
@@ -88,14 +109,14 @@ def main():
                 )
             messages.append({"role": "model", "text": saved})
             save_history(messages)
-            record_usage(usage, model, meta)
-            print(f"Bot ({model}): {answer}\n")
+            record_usage(usage, model_key, meta)
+            print(f"Bot ({model_key}): {answer}\n")
             if sources:
                 print("Nguồn:")
                 for i, (title, uri) in enumerate(sources, 1):
                     print(f"  [{i}] {title}: {uri}")
                 print()
-            print(f"  [{format_usage(usage, model)}]\n")
+            print(f"  [{format_usage(usage, model_key)}]\n")
         except Exception as e:
             print(f"Lỗi: tất cả model đều thất bại. {e}\n")
 

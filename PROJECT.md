@@ -34,3 +34,4 @@ Tự xây chatbot/agent riêng, dùng hằng ngày, không lo hết lượt.
 - Lưu ý: key Gemini miễn phí hết hạn mức ngày khá nhanh; bot tự chuyển model dự phòng
 - Tạo Word: tools/word.py (python-docx); thư viện ghi trong requirements.txt
 - /export tên: lưu chat ra exports/tên.json (để nạp lại) và tên.md (để dán sang chat khác); /import tên: nạp lại; /import (không tên): xem danh sách. Code ở transfer.py
+- Đã cập nhật `MODELS` với cấu trúc `(provider, model)` bao gồm model Groq `qwen/qwen3.8-27b` và OpenRouter `nvidia/nemotron-3-ultra-550b-a55b:free`. Các hạn mức và tracking usage chuyển sang dạng `provider/model`, tự động bỏ qua các provider chưa có key môi trường. Cài đặt thêm thư viện `openai` trong `.venv`.

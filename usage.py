@@ -27,10 +27,10 @@ def record_usage(usage, model, meta):
     save_usage(usage)
 
 
-def format_usage(usage, model):
-    entry = usage["models"].get(model, {"requests": 0, "tokens": 0})
-    text = f"{model}: {entry['requests']} lượt, {entry['tokens']} token hôm nay"
-    limit = LIMITS.get(model)
+def format_usage(usage, provider_model):
+    entry = usage["models"].get(provider_model, {"requests": 0, "tokens": 0})
+    text = f"{provider_model}: {entry['requests']} lượt, {entry['tokens']} token hôm nay"
+    limit = LIMITS.get(provider_model)
     if limit:
         used = entry["requests"]
         percent = min(used * 100 // limit, 100)
