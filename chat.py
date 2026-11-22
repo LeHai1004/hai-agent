@@ -3,6 +3,7 @@ import os
 from datetime import date
 from pathlib import Path
 
+from ddgs import DDGS
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -10,10 +11,10 @@ from google.genai import types
 load_dotenv()
 
 # Thử lần lượt từ trên xuống, model nào lỗi thì chuyển sang model kế
-MODELS = ["gemini-3.5-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
+MODELS = ["gemini-3.5-flash", "gemini-2.5-flash", "gemini-3.5-flash-lite"]
 
-# Hạn mức lượt/ngày của từng model. Tự điền số thật xem trong Google AI Studio,
-# ví dụ: {"gemini-3.5-flash": 250}. Để trống thì chỉ hiện số đếm, không hiện %.
+# Hạn mức lượt/ngày của từng model (điền số thật xem trong Google AI Studio).
+# Ví dụ: {"gemini-3.5-flash": 250}. Để trống thì chỉ hiện số đếm.
 LIMITS = {}
 
 HISTORY_FILE = Path("history") / "current.json"
@@ -74,6 +75,26 @@ def to_contents(messages):
     ]
 
 
+def web_search(query, n=5):
+    return list(DDGS().text(query, max_results=n))
+
+
+def build_prompt(question, results):
+    blocks = []
+    for i, r in enumerate(results, 1):
+        blocks.append(
+            f"[{i}] {r.get('title', '')}\n{r.get('body', '')}\n"
+            f"Nguồn: {r.get('href', '')}"
+        )
+    context = "\n\n".join(blocks)
+    return (
+        "Trả lời câu hỏi CHỈ dựa trên kết quả tìm kiếm bên dưới, ghi số [n] "
+        "khi dùng thông tin nào. Nếu kết quả không đủ thì nói rõ là không biết, "
+        "không tự bịa.\n\n"
+        f"Kết quả tìm kiếm:\n{context}\n\nCâu hỏi: {question}"
+    )
+
+
 def ask(client, messages, text):
     last_error = None
     for model in MODELS:
@@ -98,7 +119,7 @@ def main():
     usage = load_usage()
 
     print(f"Chatbot. Đã nạp {len(messages)} tin nhắn cũ.")
-    print("Lệnh: '/new' chat mới, '/usage' xem lượt dùng, 'exit' thoát.\n")
+    print("Lệnh: '/new' chat mới, '/usage' xem lượt dùng, '/web câu hỏi' tìm web, 'exit' thoát.\n")
     while True:
         text = input("Bạn: ").strip()
         if not text:
@@ -116,13 +137,35 @@ def main():
                 print("  " + format_usage(usage, m))
             print()
             continue
+
+        question = text
+        prompt = text
+        sources = []
+        if text.startswith("/web "):
+            question = text[5:].strip()
+            try:
+                results = web_search(question)
+            except Exception as e:
+                print(f"Lỗi tìm web: {e}\n")
+                continue
+            if not results:
+                print("Không tìm thấy kết quả nào.\n")
+                continue
+            prompt = build_prompt(question, results)
+            sources = [(r.get("title", ""), r.get("href", "")) for r in results]
+
         try:
-            answer, model, meta = ask(client, messages, text)
-            messages.append({"role": "user", "text": text})
+            answer, model, meta = ask(client, messages, prompt)
+            messages.append({"role": "user", "text": question})
             messages.append({"role": "model", "text": answer})
             save_history(messages)
             record_usage(usage, model, meta)
             print(f"Bot ({model}): {answer}\n")
+            if sources:
+                print("Nguồn:")
+                for i, (title, uri) in enumerate(sources, 1):
+                    print(f"  [{i}] {title}: {uri}")
+                print()
             print(f"  [{format_usage(usage, model)}]\n")
         except Exception as e:
             print(f"Lỗi: tất cả model đều thất bại. {e}\n")
