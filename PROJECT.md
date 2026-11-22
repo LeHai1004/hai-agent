@@ -24,9 +24,9 @@ Tự xây chatbot/agent riêng, dùng hằng ngày, không lo hết lượt.
 ## Trạng thái hiện tại (22/11/2026)
 
 - Python 3.12 trong .venv; chạy: python chat.py
-- Đã có: chat terminal Gemini, lưu/nạp lịch sử (history/), tự chuyển model,
-  đếm lượt/token (/usage), tìm web DuckDuckGo (/web, có nguồn, tự thử lại khi timeout)
-- /web không gửi lịch sử cũ, nguồn được lưu kèm câu trả lời
-- Lỗi đã gặp: Google Search tool báo 429/400 trên key miễn phí nên dùng DuckDuckGo;
-  gemini-2.5-flash-lite đã bị gỡ, thay bằng gemini-3.5-flash-lite
-- Việc tiếp theo: tách chat.py thành nhiều file (module), dùng Cline
+- Cấu trúc: chat.py (vòng lặp lệnh), config.py, history.py, usage.py, search.py, llm.py, tools/ (web.py, time_tool.py, **init**.py chứa TOOLS)
+- Đã có: chat terminal Gemini, lưu/nạp lịch sử (history/), tự chuyển model, đếm lượt/token (/usage), /web tìm DuckDuckGo có nguồn
+- Bot tự gọi tool (function calling): web_search, get_current_time; client dùng API v1beta
+- Thêm tool mới: tạo hàm Python có type hints + docstring trong tools/, thêm vào TOOLS
+- Lỗi đã gặp: Google Search tool báo 429/400 trên key miễn phí nên dùng DuckDuckGo; gemini-2.5-flash-lite đã bị gỡ
+- Việc tiếp theo: tool đọc/ghi file trong thư mục dự án (Cline làm), sau đó tạo file Word, import/export lịch sử
