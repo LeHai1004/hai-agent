@@ -20,3 +20,13 @@ Tự xây chatbot/agent riêng, dùng hằng ngày, không lo hết lượt.
 
 - Làm từng bước nhỏ, trả lời ngắn gọn
 - Thiết kế dễ mở rộng, không đập đi xây lại
+
+## Trạng thái hiện tại (22/11/2026)
+
+- Python 3.12 trong .venv; chạy: python chat.py
+- Đã có: chat terminal Gemini, lưu/nạp lịch sử (history/), tự chuyển model,
+  đếm lượt/token (/usage), tìm web DuckDuckGo (/web, có nguồn)
+- Lỗi đã gặp: công cụ Google Search báo 429/400 trên key miễn phí nên dùng DuckDuckGo;
+  gemini-2.5-flash-lite đã bị gỡ
+- Cần cải thiện: câu trả lời /web đôi khi lẫn nguồn cũ, cần ưu tiên nguồn mới
+- Việc tiếp theo: (điền khi chọn)

@@ -1,0 +1,9 @@
+# Luật làm việc cho project này
+
+- Bắt đầu mỗi phiên: đọc PROJECT.md trước khi làm gì.
+- Làm từng việc nhỏ, nêu kế hoạch ngắn trước khi sửa file.
+- Không tự bịa: không biết thì nói không biết, thông tin ngoài phải có nguồn.
+- Sau khi sửa code: chạy thử (python chat.py hoặc test) và báo kết quả thật.
+- Không đụng vào .env, không in hay commit API key.
+- Xong việc: cập nhật mục "Trạng thái" trong PROJECT.md rồi mới commit.
+- Giao diện: chỉ làm theo thiết kế đã có, không tự thêm.
