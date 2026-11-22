@@ -98,9 +98,22 @@ def run_openai(client, model, conv, max_rounds=5):
             conv.append({"role": "tool", "tool_call_id": c.id, "content": str(result)})
     return "Đã gọi tool quá nhiều lần mà chưa có câu trả lời.", total
 
+HARD_WORDS = (
+    "code", "lập trình", "viết", "giải thích", "phân tích", "so sánh",
+    "tại sao", "bug", "lỗi", "python", "thuật toán", "tóm tắt", "dịch",
+)
+
+
+def order_models(text):
+    t = text.lower()
+    if len(text) > 200 or any(w in t for w in HARD_WORDS):
+        return list(MODELS)
+    lite = [m for m in MODELS if "lite" in m[1]]
+    rest = [m for m in MODELS if m not in lite]
+    return lite + rest
 def ask(gemini_client, openai_clients, messages, text, use_history=True):
     last_error = None
-    for provider, model in MODELS:
+    for provider, model in order_models(text):
         try:
             if provider == "gemini":
                 history = to_contents(messages) if use_history else []

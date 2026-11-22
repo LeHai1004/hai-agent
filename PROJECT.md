@@ -30,7 +30,10 @@ Tự xây chatbot/agent riêng, dùng hằng ngày, không lo hết lượt.
 - Tool file chỉ làm việc trong workspace/ (chặn "..", đường dẫn tuyệt đối); write_file luôn hỏi y/n trước khi ghi
 - Thêm tool mới: tạo hàm Python có type hints + docstring trong tools/, thêm vào TOOLS
 - Lỗi đã gặp: Google Search tool báo 429/400 trên key miễn phí nên dùng DuckDuckGo; gemini-2.5-flash-lite đã bị gỡ
-- Việc tiếp theo: thanh tiến trình lượt dùng, tự chọn model theo câu hỏi, đọc repo GitHub rồi vẽ sơ đồ, giao diện đẹp hơn
+- Nhiều nhà cung cấp trong llm.py: MODELS là danh sách (provider, model): Gemini, Groq (qwen/qwen3.8-27b), OpenRouter (nemotron :free); nhánh Groq/OpenRouter dùng thư viện openai và tự chạy vòng lặp gọi tool; thiếu key thì bỏ qua provider đó
+- Chọn model theo câu hỏi (order_models): câu ngắn/đơn giản dùng Flash Lite trước (500 lượt/ngày), câu dài hoặc có từ khóa khó dùng Flash (20 lượt/ngày)
+- Không dùng LiteLLM (từng bị chiếm tài khoản PyPI tháng 3/2026); key để trong .env, không chụp màn hình file này
+- Việc tiếp theo: giao diện web, đọc repo GitHub rồi vẽ sơ đồ, /web nên dùng model nhẹ khi có thể
 - Lưu ý: key Gemini miễn phí hết hạn mức ngày khá nhanh; bot tự chuyển model dự phòng
 - Tạo Word: tools/word.py (python-docx); thư viện ghi trong requirements.txt
 - /export tên: lưu chat ra exports/tên.json (để nạp lại) và tên.md (để dán sang chat khác); /import tên: nạp lại; /import (không tên): xem danh sách. Code ở transfer.py
