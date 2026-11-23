@@ -4,6 +4,7 @@ from google import genai
 from google.genai import types
 from openai import OpenAI
 from transfer import export_chat, import_chat, list_exports
+from gitcoach import git_coach
 from translate import translate
 from config import MODELS
 from history import load_history, save_history
@@ -53,7 +54,7 @@ def main():
     da_bao = False
 
     print(f"Chatbot. Đã nạp {len(messages)} tin nhắn cũ.")
-    print("Lệnh: '/new' chat mới, '/usage' xem lượt dùng, '/web câu hỏi' tìm web, '/en câu' dịch Việt-Anh, 'exit' thoát.\n")
+    print("Lệnh: '/new' chat mới, '/usage' xem lượt dùng, '/web câu hỏi' tìm web, '/en câu' dịch Việt-Anh, '/git owner/repo' Git Coach, 'exit' thoát.\n")
     while True:
         text = input("Bạn: ").strip()
         if not text:
@@ -106,6 +107,19 @@ def main():
                 print(f"Lỗi dịch: {e}\n")
                 continue
             print(f"\n{reply}\n[{model_name}]\n")
+        if text.startswith("/git "):
+            repo_name = text[5:].strip()
+            if not repo_name:
+                print("Dùng: /git owner/repo (ví dụ: /git torvalds/linux)\n")
+                continue
+            try:
+                reply, model_name, meta = git_coach(gemini_client, openai_clients, repo_name)
+            except Exception as e:
+                print(f"Lỗi Git Coach: {e}\n")
+                continue
+            print(f"\n{reply}\n[{model_name}]\n")
+            continue
+
             continue
         if text.startswith("/web "):
             question = text[5:].strip()

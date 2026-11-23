@@ -25,9 +25,9 @@ Tự xây chatbot/agent riêng, dùng hằng ngày, không lo hết lượt.
 
 **Chạy:** `python chat.py` trong .venv (Python 3.12). Key trong .env: GEMINI_API_KEY, GROQ_API_KEY, OPENROUTER_API_KEY (tùy chọn GITHUB_TOKEN cho repo riêng tư).
 
-**Lệnh trong chat:** /new, /usage, /web câu hỏi, /export, /import, exit.
+**Lệnh trong chat:** /new, /usage, /web câu hỏi, /en câu, /git owner/repo, /export, /import, exit.
 
-**File chính:** chat.py (vòng lặp chat, cảnh báo lịch sử dài NGUONG_CANH_BAO=8000), llm.py (gọi model, chạy tool, chọn model theo câu hỏi bằng HARD_WORDS, SYSTEM_INSTRUCTION), config.py, history.py, usage.py, search.py (/web bằng DuckDuckGo), transfer.py (export/import).
+**File chính:** chat.py (vòng lặp chat, cảnh báo lịch sử dài NGUONG_CANH_BAO=8000), llm.py (gọi model, chạy tool, chọn model theo câu hỏi bằng HARD_WORDS, SYSTEM_INSTRUCTION), config.py, history.py, usage.py, search.py (/web bằng DuckDuckGo), transfer.py (export/import), translate.py (/en), gitcoach.py (/git).
 
 **Tool (thư mục tools/, đăng ký trong tools/**init**.py):** web_search, get_current_time, list_files/read_file/write_file (thư mục workspace/, ghi file hỏi y/n), create_word, read_repo (quét cấu trúc dự án), draw_diagram (sơ đồ Mermaid lưu workspace/diagram.md), read_github, github_stats, github_commit (có tham số file để xem patch), github_branches, read_webpage (đọc 1 trang web, chặn địa chỉ nội bộ, dùng certifi).
 
@@ -37,4 +37,4 @@ Tự xây chatbot/agent riêng, dùng hằng ngày, không lo hết lượt.
 
 **Hạn chế đã biết:** gemini-3.5-flash chỉ ~20 lượt/ngày (hết thì tự chuyển gemini-2.5-flash); model lite tóm tắt kết quả web đôi khi sai; GitHub chưa có token chỉ 60 lần gọi/giờ; read_webpage chỉ lấy ~6000 ký tự và không chạy JavaScript.
 
-**Việc tiếp theo (chưa làm):** lệnh dịch song ngữ Việt-Anh; Git Coach (giải thích lịch sử commit dễ hiểu); chọn model theo câu hỏi tốt hơn; không gian "project" riêng; ghi chú "chưa xác nhận" khi tóm tắt web.
+**Việc tiếp theo (chưa làm):** chọn model theo câu hỏi tốt hơn; không gian "project" riêng; ghi chú "chưa xác nhận" khi tóm tắt web.
