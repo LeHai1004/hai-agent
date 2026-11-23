@@ -4,7 +4,7 @@ from google import genai
 from google.genai import types
 from openai import OpenAI
 from transfer import export_chat, import_chat, list_exports
-
+from translate import translate
 from config import MODELS
 from history import load_history, save_history
 from usage import format_usage, load_usage, record_usage
@@ -53,7 +53,7 @@ def main():
     da_bao = False
 
     print(f"Chatbot. Đã nạp {len(messages)} tin nhắn cũ.")
-    print("Lệnh: '/new' chat mới, '/usage' xem lượt dùng, '/web câu hỏi' tìm web, 'exit' thoát.\n")
+    print("Lệnh: '/new' chat mới, '/usage' xem lượt dùng, '/web câu hỏi' tìm web, '/en câu' dịch Việt-Anh, 'exit' thoát.\n")
     while True:
         text = input("Bạn: ").strip()
         if not text:
@@ -95,6 +95,18 @@ def main():
         question = text
         prompt = text
         sources = []
+        if text.startswith("/en "):
+            sentence = text[4:].strip()
+            if not sentence:
+                print("Dùng: /en câu cần dịch\n")
+                continue
+            try:
+                reply, model_name, meta = translate(gemini_client, openai_clients, sentence)
+            except Exception as e:
+                print(f"Lỗi dịch: {e}\n")
+                continue
+            print(f"\n{reply}\n[{model_name}]\n")
+            continue
         if text.startswith("/web "):
             question = text[5:].strip()
             try:

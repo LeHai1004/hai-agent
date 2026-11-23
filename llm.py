@@ -116,9 +116,9 @@ def order_models(text):
     lite = [m for m in MODELS if "lite" in m[1]]
     rest = [m for m in MODELS if m not in lite]
     return lite + rest
-def ask(gemini_client, openai_clients, messages, text, use_history=True):
+def ask(gemini_client, openai_clients, messages, text, use_history=True, route_text=None):
     last_error = None
-    for provider, model in order_models(text):
+    for provider, model in order_models(route_text or text):
         try:
             if provider == "gemini":
                 history = to_contents(messages) if use_history else []
