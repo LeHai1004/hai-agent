@@ -13,6 +13,12 @@ from llm import ask
 
 load_dotenv()
 
+NGUONG_CANH_BAO = 8000  # số token ước lượng của lịch sử, vượt thì cảnh báo
+
+
+def uoc_luong_token(messages):
+    # ước lượng thô: tiếng Việt khoảng 3 ký tự = 1 token
+    return sum(len(m["text"]) for m in messages) // 3
 
 def main():
     gemini_api_key = os.environ.get("GEMINI_API_KEY")
@@ -44,6 +50,7 @@ def main():
 
     messages = load_history()
     usage = load_usage()
+    da_bao = False
 
     print(f"Chatbot. Đã nạp {len(messages)} tin nhắn cũ.")
     print("Lệnh: '/new' chat mới, '/usage' xem lượt dùng, '/web câu hỏi' tìm web, 'exit' thoát.\n")
@@ -55,6 +62,7 @@ def main():
             break
         if text == "/new":
             messages = []
+            da_bao = False
             save_history(messages)
             print("Đã bắt đầu cuộc chat mới.\n")
             continue
@@ -80,6 +88,7 @@ def main():
                 print(error + "\n")
                 continue
             messages = data
+            da_bao = False
             save_history(messages)
             print(f"Đã nạp {len(messages)} tin nhắn từ '{name}'.\n")
             continue
@@ -99,6 +108,14 @@ def main():
             prompt = build_prompt(question, results)
             sources = [(r.get("title", ""), r.get("href", "")) for r in results]
 
+        if not sources and not da_bao and uoc_luong_token(messages) > NGUONG_CANH_BAO:
+                    print(f"⚠ Lịch sử chat đã khoảng {uoc_luong_token(messages)} token, "
+                        "mỗi câu hỏi đều gửi lại toàn bộ chỗ này nên sẽ tốn nhiều.")
+                    print("  Gợi ý: gõ /export rồi /new để bắt đầu chat mới (lịch sử vẫn lưu, cần thì /import lại).")
+                    da_bao = True
+                    if input("  Vẫn gửi câu này? (y/n): ").strip().lower() != "y":
+                        print()
+                        continue
         try:
             answer, model_key, meta = ask(gemini_client, openai_clients, messages, prompt, use_history=not sources)
             messages.append({"role": "user", "text": question})
