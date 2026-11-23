@@ -101,8 +101,8 @@ def run_openai(client, model, conv, max_rounds=5):
 HARD_WORDS = (
     "code", "lập trình", "viết", "giải thích", "phân tích", "so sánh",
     "tại sao", "bug", "lỗi", "python", "thuật toán", "tóm tắt", "dịch",
+    "suy luận", "chứng minh", "tối ưu", "thiết kế",
 )
-
 
 def order_models(text):
     t = text.lower()
