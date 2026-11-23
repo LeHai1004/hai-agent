@@ -5,6 +5,7 @@ from google.genai import types
 from openai import OpenAI
 from transfer import export_chat, import_chat, list_exports
 from gitcoach import git_coach
+from visual import visualize
 from translate import translate
 from config import MODELS
 from history import load_history, save_history
@@ -54,7 +55,7 @@ def main():
     da_bao = False
 
     print(f"Chatbot. Đã nạp {len(messages)} tin nhắn cũ.")
-    print("Lệnh: '/new' chat mới, '/usage' xem lượt dùng, '/web câu hỏi' tìm web, '/en câu' dịch Việt-Anh, '/git owner/repo' Git Coach, 'exit' thoát.\n")
+    print("Lệnh: '/new' chat mới, '/usage' xem lượt dùng, '/web câu hỏi' tìm web, '/en câu' dịch Việt-Anh, '/git owner/repo' Git Coach, '/vis nội dung' trực quan hóa, 'exit' thoát.\n")
     while True:
         text = input("Bạn: ").strip()
         if not text:
@@ -118,6 +119,19 @@ def main():
                 print(f"Lỗi Git Coach: {e}\n")
                 continue
             print(f"\n{reply}\n[{model_name}]\n")
+        if text.startswith("/vis "):
+            vis_content = text[5:].strip()
+            if not vis_content:
+                print("Dùng: /vis câu hỏi hoặc đoạn code\n")
+                continue
+            try:
+                reply, model_name, meta = visualize(gemini_client, openai_clients, vis_content)
+            except Exception as e:
+                print(f"Lỗi trực quan hóa: {e}\n")
+                continue
+            print(f"\n{reply}\n\n[Đã lưu sơ đồ vào workspace/vis.md]\n[{model_name}]\n")
+            continue
+
             continue
 
             continue

@@ -25,9 +25,9 @@ Tự xây chatbot/agent riêng, dùng hằng ngày, không lo hết lượt.
 
 **Chạy:** `python chat.py` trong .venv (Python 3.12). Key trong .env: GEMINI_API_KEY, GROQ_API_KEY, OPENROUTER_API_KEY (tùy chọn GITHUB_TOKEN cho repo riêng tư).
 
-**Lệnh trong chat:** /new, /usage, /web câu hỏi, /en câu, /git owner/repo, /export, /import, exit.
+**Lệnh trong chat:** /new, /usage, /web câu hỏi, /en câu, /git owner/repo, /vis nội dung, /export, /import, exit.
 
-**File chính:** chat.py (vòng lặp chat, cảnh báo lịch sử dài NGUONG_CANH_BAO=8000), llm.py (gọi model, chạy tool, chọn model theo câu hỏi bằng HARD_WORDS, SYSTEM_INSTRUCTION), config.py, history.py, usage.py, search.py (/web bằng DuckDuckGo), transfer.py (export/import), translate.py (/en), gitcoach.py (/git).
+**File chính:** chat.py (vòng lặp chat, cảnh báo lịch sử dài NGUONG_CANH_BAO=8000), llm.py (gọi model, chạy tool, chọn model theo câu hỏi bằng HARD_WORDS, SYSTEM_INSTRUCTION), config.py, history.py, usage.py, search.py (/web bằng DuckDuckGo), transfer.py (export/import), translate.py (/en), gitcoach.py (/git), visual.py (/vis).
 
 **Tool (thư mục tools/, đăng ký trong tools/**init**.py):** web_search, get_current_time, list_files/read_file/write_file (thư mục workspace/, ghi file hỏi y/n), create_word, read_repo (quét cấu trúc dự án), draw_diagram (sơ đồ Mermaid lưu workspace/diagram.md), read_github, github_stats, github_commit (có tham số file để xem patch), github_branches, read_webpage (đọc 1 trang web, chặn địa chỉ nội bộ, dùng certifi).
 
