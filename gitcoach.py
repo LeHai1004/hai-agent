@@ -1,5 +1,5 @@
 from llm import ask
-from tools.github import github_stats, github_branches, read_github
+from tools.github import github_stats, github_branches, read_github, _chuan_hoa, _get, API
 
 
 def build_git_prompt(repo, stats_text, branches_text, commits_text):
@@ -27,9 +27,8 @@ def git_coach(gemini_client, openai_clients, repo_input):
     stats_res = github_stats(repo)
     branches_res = github_branches(repo)
     
-    # Lấy vài commit gần nhất bằng cách gọi read_github hoặc API lấy commits
-    # read_github đã bao gồm mô tả, file list và 15 commit gần nhất
-    github_info = read_github(repo)
+    # Lấy read_github đầy đủ để in ra terminal thô
+    full_github_info = read_github(repo)
     
     # In kết quả thô ra terminal trước
     print("\n--- KẾT QUẢ THÔ TỪ GITHUB ---")
@@ -38,10 +37,39 @@ def git_coach(gemini_client, openai_clients, repo_input):
     print("\n2. Nhánh:")
     print(branches_res)
     print("\n3. Thông tin repo & commit gần nhất:")
-    print(github_info)
+    print(full_github_info)
     print("------------------------------\n")
 
-    prompt = build_git_prompt(repo, stats_res, branches_res, github_info)
+    # Xử lý cắt bỏ phần "File:" và danh sách file khỏi full_github_info để tạo commits_text cho prompt model
+    # full_github_info từ read_github có dạng:
+    # Repo: ...
+    # Mô tả: ...
+    # Nhánh mặc định: ...
+    # 
+    # File:
+    # - ...
+    # ...
+    # 
+    # Commit gần nhất:
+    # - ...
+    lines = full_github_info.splitlines()
+    model_lines = []
+    ignoring_files = False
+    for line in lines:
+        if line.startswith("File:"):
+            ignoring_files = True
+            continue
+        if ignoring_files:
+            if line.startswith("Commit gần nhất:"):
+                ignoring_files = False
+                model_lines.append(line)
+            continue
+        model_lines.append(line)
+    commits_text = "\n".join(model_lines)
+
+    prompt = build_git_prompt(repo, stats_res, branches_res, commits_text)
     
     # Gọi model để giải thích bằng tiếng Việt
     return ask(gemini_client, openai_clients, [], prompt, use_history=False, route_text=repo)
+
+
