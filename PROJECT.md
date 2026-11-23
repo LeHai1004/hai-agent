@@ -21,20 +21,20 @@ Tự xây chatbot/agent riêng, dùng hằng ngày, không lo hết lượt.
 - Làm từng bước nhỏ, trả lời ngắn gọn
 - Thiết kế dễ mở rộng, không đập đi xây lại
 
-## Trạng thái hiện tại (22/11/2026)
+## Trạng thái hiện tại (cập nhật 23/11/2026)
 
-- Python 3.12 trong .venv; chạy: python chat.py
-- Cấu trúc: chat.py (vòng lặp lệnh), config.py, history.py, usage.py, search.py, llm.py, tools/ (web.py, time_tool.py, **init**.py chứa TOOLS)
-- Đã có: chat terminal Gemini, lưu/nạp lịch sử (history/), tự chuyển model, đếm lượt/token (/usage), /web tìm DuckDuckGo có nguồn
-- Bot tự gọi tool (function calling): web_search, get_current_time, list_files, read_file, write_file; client dùng API v1beta
-- Tool file chỉ làm việc trong workspace/ (chặn "..", đường dẫn tuyệt đối); write_file luôn hỏi y/n trước khi ghi
-- Thêm tool mới: tạo hàm Python có type hints + docstring trong tools/, thêm vào TOOLS
-- Lỗi đã gặp: Google Search tool báo 429/400 trên key miễn phí nên dùng DuckDuckGo; gemini-2.5-flash-lite đã bị gỡ
-- Nhiều nhà cung cấp trong llm.py: MODELS là danh sách (provider, model): Gemini, Groq (qwen/qwen3.8-27b), OpenRouter (nemotron :free); nhánh Groq/OpenRouter dùng thư viện openai và tự chạy vòng lặp gọi tool; thiếu key thì bỏ qua provider đó
-- Chọn model theo câu hỏi (order_models): câu ngắn/đơn giản dùng Flash Lite trước (500 lượt/ngày), câu dài hoặc có từ khóa khó dùng Flash (20 lượt/ngày)
-- Không dùng LiteLLM (từng bị chiếm tài khoản PyPI tháng 3/2026); key để trong .env, không chụp màn hình file này
-- Việc tiếp theo: giao diện web, đọc repo GitHub rồi vẽ sơ đồ, /web nên dùng model nhẹ khi có thể
-- Lưu ý: key Gemini miễn phí hết hạn mức ngày khá nhanh; bot tự chuyển model dự phòng
-- Tạo Word: tools/word.py (python-docx); thư viện ghi trong requirements.txt
-- /export tên: lưu chat ra exports/tên.json (để nạp lại) và tên.md (để dán sang chat khác); /import tên: nạp lại; /import (không tên): xem danh sách. Code ở transfer.py
-- Đã cập nhật `MODELS` với cấu trúc `(provider, model)` bao gồm model Groq `qwen/qwen3.8-27b` và OpenRouter `nvidia/nemotron-3-ultra-550b-a55b:free`. Các hạn mức và tracking usage chuyển sang dạng `provider/model`, tự động bỏ qua các provider chưa có key môi trường. Cài đặt thêm thư viện `openai` trong `.venv`.
+**Chạy:** `python chat.py` trong .venv (Python 3.12). Key trong .env: GEMINI_API_KEY, GROQ_API_KEY, OPENROUTER_API_KEY (tùy chọn GITHUB_TOKEN cho repo riêng tư).
+
+**Lệnh trong chat:** /new, /usage, /web câu hỏi, /export, /import, exit.
+
+**File chính:** chat.py (vòng lặp chat, cảnh báo lịch sử dài NGUONG_CANH_BAO=8000), llm.py (gọi model, chạy tool, chọn model theo câu hỏi bằng HARD_WORDS, SYSTEM_INSTRUCTION), config.py, history.py, usage.py, search.py (/web bằng DuckDuckGo), transfer.py (export/import).
+
+**Tool (thư mục tools/, đăng ký trong tools/**init**.py):** web_search, get_current_time, list_files/read_file/write_file (thư mục workspace/, ghi file hỏi y/n), create_word, read_repo (quét cấu trúc dự án), draw_diagram (sơ đồ Mermaid lưu workspace/diagram.md), read_github, github_stats, github_commit (có tham số file để xem patch), github_branches, read_webpage (đọc 1 trang web, chặn địa chỉ nội bộ, dùng certifi).
+
+**Tool nặng (hỏi y/n trước khi chạy):** github_branches, github_commit, read_repo, khai báo trong dict NANG ở tools/**init**.py.
+
+**Quy ước làm việc:** làm từng bước nhỏ, commit sau mỗi bước; tool lỗi phải báo rõ, không bịa; kiểm tra tool bằng python -c trước rồi mới thử qua bot; tool mới viết trong tools/ rồi thêm vào TOOLS.
+
+**Hạn chế đã biết:** gemini-3.5-flash chỉ ~20 lượt/ngày (hết thì tự chuyển gemini-2.5-flash); model lite tóm tắt kết quả web đôi khi sai; GitHub chưa có token chỉ 60 lần gọi/giờ; read_webpage chỉ lấy ~6000 ký tự và không chạy JavaScript.
+
+**Việc tiếp theo (chưa làm):** lệnh dịch song ngữ Việt-Anh; Git Coach (giải thích lịch sử commit dễ hiểu); chọn model theo câu hỏi tốt hơn; không gian "project" riêng; ghi chú "chưa xác nhận" khi tóm tắt web.
