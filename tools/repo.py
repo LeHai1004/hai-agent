@@ -74,5 +74,52 @@ def read_repo(path: str) -> str:
         kq = kq[:8000] + "\n... (đã cắt bớt vì quá dài)"
     return kq
 
+def _id(ten: str) -> str:
+    return ten.replace("/", "_").replace(".", "_")
+
+
+def draw_diagram(path: str = ".") -> str:
+    """Draw a Mermaid diagram of which project file imports which file.
+    Saves it to workspace/diagram.md. Use path "." for the whole project."""
+    print(f"  [tool] draw_diagram {path}")
+    goc = Path(path).resolve()
+    if not goc.is_dir():
+        return f"Không tìm thấy thư mục: {path}"
+    files = [f for f in sorted(goc.rglob("*.py"))
+             if not any(p in BO_QUA for p in f.relative_to(goc).parts)]
+
+    ten_module = {}
+    for f in files:
+        rel = f.relative_to(goc).as_posix()
+        if f.name == "__init__.py":
+            if f.parent != goc:
+                ten_module[f.parent.name] = rel
+        else:
+            ten_module.setdefault(f.stem, rel)
+
+    canh = set()
+    for f in files:
+        rel = f.relative_to(goc).as_posix()
+        kq = _phan_tich_py(f)
+        if not kq:
+            continue
+        for ten in kq[0]:
+            dich = ten_module.get(ten)
+            if dich and dich != rel:
+                canh.add((rel, dich))
+
+    dong = ["graph LR"]
+    for f in files:
+        rel = f.relative_to(goc).as_posix()
+        dong.append(f'    {_id(rel)}["{rel}"]')
+    for a, b in sorted(canh):
+        dong.append(f"    {_id(a)} --> {_id(b)}")
+    code = "\n".join(dong)
+
+    out = Path("workspace")
+    out.mkdir(exist_ok=True)
+    (out / "diagram.md").write_text(f"```mermaid\n{code}\n```\n", encoding="utf-8")
+    return f"Đã lưu workspace/diagram.md. Mã Mermaid:\n{code}"
+
 if __name__ == "__main__":
     print(scan_repo(sys.argv[1] if len(sys.argv) > 1 else "."))
