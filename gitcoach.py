@@ -9,6 +9,7 @@ def build_git_prompt(repo, stats_text, branches_text, commits_text):
         f"(1) Ai làm bao nhiêu commit (dựa vào số liệu thống kê tác giả).\n"
         f"(2) Nhánh nào đang hoạt động (dựa vào danh sách nhánh).\n"
         f"(3) Cách đọc một dòng commit (giải thích cấu trúc hash, message, tác giả, ngày từ vài commit gần nhất).\n\n"
+        f"Chỉ dùng văn bản thường, không dùng LaTeX hay ký hiệu $$.\n"
         f"Chỉ dùng số liệu từ kết quả tool dưới đây, không bịa số.\n\n"
         f"=== THỐNG KÊ TÁC GIẢ ===\n{stats_text}\n\n"
         f"=== DANH SÁCH NHÁNH ===\n{branches_text}\n\n"
