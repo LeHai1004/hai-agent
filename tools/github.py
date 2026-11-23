@@ -50,3 +50,44 @@ def read_github(repo: str) -> str:
         msg = c["commit"]["message"].splitlines()[0]
         dong.append(f"- {c['sha'][:7]} | {ngay} | {tac_gia} | {msg}")
     return "\n".join(dong)
+
+def _chuan_hoa(repo: str) -> str:
+    repo = repo.strip().removeprefix("https://github.com/").removesuffix(".git")
+    return "/".join(repo.strip("/").split("/")[:2])
+
+
+def github_stats(repo: str, branch: str = "") -> str:
+    """Count commits per author over the whole history of a GitHub repository.
+    repo is "owner/name" or a github.com URL. branch is optional (default branch if empty)."""
+    print(f"  [tool] github_stats {repo} {branch}")
+    repo = _chuan_hoa(repo)
+    dem = {}
+    tong = 0
+    try:
+        for trang in range(1, 11):  # tối đa 1000 commit
+            url = f"{API}/repos/{repo}/commits?per_page=100&page={trang}"
+            if branch:
+                url += f"&sha={branch}"
+            ds = _get(url)
+            for c in ds:
+                ten = (c.get("author") or {}).get("login") or c["commit"]["author"]["name"]
+                ngay = c["commit"]["author"]["date"][:10]
+                d = dem.setdefault(ten, {"so": 0, "dau": ngay, "cuoi": ngay})
+                d["so"] += 1
+                d["dau"] = min(d["dau"], ngay)
+                d["cuoi"] = max(d["cuoi"], ngay)
+                tong += 1
+            if len(ds) < 100:
+                break
+    except urllib.error.HTTPError as e:
+        return f"Lỗi GitHub {e.code}: repo/nhánh không tồn tại, là repo riêng tư hoặc hết hạn mức."
+    except Exception as e:
+        return f"Lỗi khi gọi GitHub: {e}"
+
+    dong = [f"Repo: {repo} | nhánh: {branch or 'mặc định'} | tổng {tong} commit", ""]
+    for ten, d in sorted(dem.items(), key=lambda x: -x[1]["so"]):
+        phan_tram = d["so"] * 100 // tong if tong else 0
+        dong.append(f"- {ten}: {d['so']} commit ({phan_tram}%), từ {d['dau']} đến {d['cuoi']}")
+    kq = "\n".join(dong)
+    print(kq)
+    return kq
