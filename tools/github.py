@@ -92,10 +92,12 @@ def github_stats(repo: str, branch: str = "") -> str:
     print(kq)
     return kq
 
-def github_commit(repo: str, sha: str) -> str:
+def github_commit(repo: str, sha: str, file: str = "") -> str:
     """Show the details of one commit in a GitHub repository: author, date, message
-    and the files it changed with lines added and removed. sha can be the short 7-char form."""
-    print(f"  [tool] github_commit {repo} {sha}")
+    and the files it changed with lines added and removed. sha can be the short 7-char form.
+    If file is given (part of a file name), also include the actual code changes (patch)
+    of the matching files."""
+    print(f"  [tool] github_commit {repo} {sha} {file}")
     repo = _chuan_hoa(repo)
     try:
         c = _get(f"{API}/repos/{repo}/commits/{sha.strip()}")
@@ -118,6 +120,17 @@ def github_commit(repo: str, sha: str) -> str:
         dong.append(f"- {f['filename']} ({f['status']}, +{f['additions']} -{f['deletions']})")
     if len(files) > 50:
         dong.append(f"... và {len(files) - 50} file nữa")
+
+    if file:
+        khop = [f for f in files if file.lower() in f["filename"].lower()]
+        if not khop:
+            dong.append(f"\nKhông có file nào khớp '{file}' trong commit này.")
+        for f in khop[:3]:
+            patch = f.get("patch", "(không có nội dung, có thể là file nhị phân hoặc quá lớn)")
+            if len(patch) > 4000:
+                patch = patch[:4000] + "\n... (đã cắt bớt)"
+            dong += ["", f"=== Thay đổi của {f['filename']} ===", patch]
+
     kq = "\n".join(dong)
     print(kq)
     return kq
