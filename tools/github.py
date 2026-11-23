@@ -134,3 +134,44 @@ def github_commit(repo: str, sha: str, file: str = "") -> str:
     kq = "\n".join(dong)
     print(kq)
     return kq
+
+def github_branches(repo: str) -> str:
+    """List the branches of a GitHub repository, newest first, with the author, date
+    and message of each branch's latest commit."""
+    print(f"  [tool] github_branches {repo}")
+    repo = _chuan_hoa(repo)
+    try:
+        ds = _get(f"{API}/repos/{repo}/branches?per_page=100")
+    except urllib.error.HTTPError as e:
+        return f"Lỗi GitHub {e.code}: repo không tồn tại, là repo riêng tư hoặc hết hạn mức."
+    except Exception as e:
+        return f"Lỗi khi gọi GitHub: {e}"
+
+    het_han_muc = False
+    cac_nhanh = []
+    for b in ds[:40]:
+        thong_tin = ""
+        if not het_han_muc:
+            try:
+                url = f"{API}/repos/{repo}/commits?sha={b['commit']['sha']}&per_page=1"
+                c = _get(url)[0]
+                tac_gia = (c.get("author") or {}).get("login") or c["commit"]["author"]["name"]
+                ngay = c["commit"]["author"]["date"][:10]
+                msg = c["commit"]["message"].splitlines()[0]
+                thong_tin = f"{ngay} | {tac_gia} | {msg}"
+            except urllib.error.HTTPError as e:
+                if e.code in (403, 429):
+                    het_han_muc = True
+            except Exception:
+                pass
+        cac_nhanh.append((thong_tin, b["name"]))
+
+    cac_nhanh.sort(key=lambda x: x[0], reverse=True)
+    dong = [f"Repo: {repo} | {len(ds)} nhánh", ""]
+    for thong_tin, ten in cac_nhanh:
+        dong.append(f"- {ten} | {thong_tin or '(chưa lấy được thông tin)'}")
+    if het_han_muc:
+        dong.append("\nLưu ý: GitHub đã hết hạn mức gọi API, một số nhánh chưa có thông tin.")
+    kq = "\n".join(dong)
+    print(kq)
+    return kq    
