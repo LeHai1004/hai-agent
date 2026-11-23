@@ -91,3 +91,33 @@ def github_stats(repo: str, branch: str = "") -> str:
     kq = "\n".join(dong)
     print(kq)
     return kq
+
+def github_commit(repo: str, sha: str) -> str:
+    """Show the details of one commit in a GitHub repository: author, date, message
+    and the files it changed with lines added and removed. sha can be the short 7-char form."""
+    print(f"  [tool] github_commit {repo} {sha}")
+    repo = _chuan_hoa(repo)
+    try:
+        c = _get(f"{API}/repos/{repo}/commits/{sha.strip()}")
+    except urllib.error.HTTPError as e:
+        return f"Lỗi GitHub {e.code}: repo/commit không tồn tại, là repo riêng tư hoặc hết hạn mức."
+    except Exception as e:
+        return f"Lỗi khi gọi GitHub: {e}"
+
+    info = c["commit"]
+    tk = c.get("stats", {})
+    files = c.get("files", [])
+    dong = [
+        f"Commit {c['sha'][:7]} | {info['author']['name']} | {info['author']['date'][:10]}",
+        f"Nội dung: {info['message']}",
+        f"Tổng: +{tk.get('additions', 0)} -{tk.get('deletions', 0)} dòng, {len(files)} file",
+        "",
+        "File đã đổi:",
+    ]
+    for f in files[:50]:
+        dong.append(f"- {f['filename']} ({f['status']}, +{f['additions']} -{f['deletions']})")
+    if len(files) > 50:
+        dong.append(f"... và {len(files) - 50} file nữa")
+    kq = "\n".join(dong)
+    print(kq)
+    return kq
