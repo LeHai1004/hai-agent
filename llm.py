@@ -7,6 +7,8 @@ from google.genai import types
 from config import MODELS
 from tools import TOOLS
 import re
+from config import MODELS, LIMITS
+from usage import load_usage
 
 SYSTEM_INSTRUCTION = (
     "Trả lời bằng tiếng Việt, ngắn gọn. "
@@ -138,9 +140,22 @@ def order_models(text):
     rest = [m for m in MODELS if m not in lite]
     return lite + rest
 
+def available_models(text):
+    ordered = order_models(text)
+    used = load_usage()["models"]
+    ok = []
+    for provider, model in ordered:
+        key = f"{provider}/{model}"
+        limit = LIMITS.get(key)
+        if limit and used.get(key, {}).get("requests", 0) >= limit:
+            print(f"  [{key}] hết {limit} lượt hôm nay, bỏ qua")
+            continue
+        ok.append((provider, model))
+    return ok or ordered
+
 def ask(gemini_client, openai_clients, messages, text, use_history=True, route_text=None):
     last_error = None
-    for provider, model in order_models(route_text or text):
+    for provider, model in available_models(route_text or text):
         try:
             if provider == "gemini":
                 history = to_contents(messages) if use_history else []
