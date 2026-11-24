@@ -12,6 +12,8 @@ from usage import load_usage
 
 SYSTEM_INSTRUCTION = (
     "Trả lời bằng tiếng Việt, ngắn gọn. "
+    "Câu hỏi kiến thức ổn định (khái niệm, so sánh công nghệ, giải thích code) "
+    "thì trả lời thẳng, KHÔNG gọi web_search. "
     "Với câu hỏi về giờ, ngày, hoặc thông tin có thể đã thay đổi (giá cả, tin tức), "
     "BẮT BUỘC gọi tool tương ứng ở mỗi lần hỏi, không lấy câu trả lời cũ trong lịch sử. "
     "Khi dùng thông tin từ web_search phải ghi số nguồn [n] và liệt kê link; "
