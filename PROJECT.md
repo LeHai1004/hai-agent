@@ -38,3 +38,8 @@ Tự xây chatbot/agent riêng, dùng hằng ngày, không lo hết lượt.
 **Hạn chế đã biết:** gemini-3.5-flash chỉ ~20 lượt/ngày (hết thì tự chuyển gemini-2.5-flash); model lite tóm tắt kết quả web đôi khi sai; GitHub chưa có token chỉ 60 lần gọi/giờ; read_webpage chỉ lấy ~6000 ký tự và không chạy JavaScript.
 
 **Việc tiếp theo (chưa làm):** chọn model theo câu hỏi tốt hơn; không gian "project" riêng; ghi chú "chưa xác nhận" khi tóm tắt web.
+
+- Chọn model (llm.py): score_question chấm điểm câu hỏi (độ dài, code/traceback, từ khóa mạnh/vừa khớp theo từ nguyên). Điểm >= 3 thì thử model mạnh trước, thấp hơn thì thử flash-lite trước.
+- available_models bỏ qua model đã dùng hết LIMITS trong ngày (đọc history/usage.json); nếu tất cả đều hết thì vẫn thử lại theo thứ tự cũ.
+- SYSTEM_INSTRUCTION: câu kiến thức ổn định thì không gọi web_search.
+- Kiểm tra điểm: python test_route.py
