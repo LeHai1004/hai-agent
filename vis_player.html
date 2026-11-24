@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Demo trực quan</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: #0b0b12;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        min-height: 100vh;
+        font-family: system-ui, sans-serif;
+        color: #fff;
+      }
+      #phone {
+        width: min(92vw, 420px);
+        aspect-ratio: 9/16;
+        max-height: 96vh;
+        background: radial-gradient(
+          circle at 50% 85%,
+          #2a1f5c,
+          #0e1030 60%,
+          #07070f
+        );
+        border-radius: 24px;
+        position: relative;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        padding: 26px 16px 14px;
+      }
+      #bar {
+        position: absolute;
+        left: 0;
+        top: 0;
+        height: 4px;
+        background: #ff4d6d;
+        width: 0;
+        transition: width 0.4s;
+      }
+      #title {
+        font-size: 26px;
+        font-weight: 800;
+        text-align: center;
+        min-height: 70px;
+        display: flex;
+        align-items: center;
+      }
+      #stage {
+        flex: 1;
+        width: 100%;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        justify-content: center;
+        align-content: center;
+      }
+      #stage.stack {
+        flex-direction: column;
+        flex-wrap: nowrap;
+        align-items: stretch;
+        padding: 0 14px;
+      }
+      .chip {
+        padding: 11px 14px;
+        border-radius: 12px;
+        font-weight: 700;
+        text-align: center;
+        border: 2px solid;
+        opacity: 0;
+        transform: translateY(16px) scale(0.9);
+        transition: all 0.45s;
+      }
+      .chip.show {
+        opacity: 1;
+        transform: none;
+      }
+      .c0 {
+        background: #22d3c5;
+        color: #04222a;
+        border-color: #22d3c5;
+      }
+      .c1 {
+        background: #ffc531;
+        color: #2a1c00;
+        border-color: #ffc531;
+      }
+      .c2 {
+        background: #3ddc97;
+        color: #04261a;
+        border-color: #3ddc97;
+      }
+      .c3 {
+        background: #2b3a78;
+        border-color: #8ea2ff;
+      }
+      .c4 {
+        background: #7c5cff;
+        border-color: #c7b8ff;
+      }
+      .chip.hl {
+        background: #ff4d6d;
+        color: #fff;
+        border-color: #ffb3c1;
+        box-shadow: 0 0 22px #ff4d6dcc;
+        transform: scale(1.06);
+      }
+      #caption {
+        font-size: 23px;
+        font-weight: 800;
+        text-align: center;
+        min-height: 72px;
+        display: flex;
+        align-items: center;
+        margin: 8px 0;
+      }
+      #caption b {
+        color: #ffc531;
+      }
+      #ctrl {
+        display: flex;
+        gap: 10px;
+      }
+      button {
+        background: #1e2250;
+        color: #fff;
+        border: 1px solid #4a52a8;
+        border-radius: 10px;
+        padding: 8px 16px;
+        font-size: 15px;
+        cursor: pointer;
+      }
+      #note {
+        font-size: 12px;
+        color: #ff9aa8;
+        margin-top: 6px;
+        min-height: 14px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="phone">
+      <div id="bar"></div>
+      <div id="title"></div>
+      <div id="stage"></div>
+      <div id="caption"></div>
+      <div id="ctrl">
+        <button id="prev">◀ Trước</button>
+        <button id="play">▶ Phát</button>
+        <button id="next">Sau ▶</button>
+      </div>
+      <div id="note"></div>
+    </div>
+    <script>
+      const SCENES = window.SCENES_OVERRIDE || [
+        {
+          title: "KHI GỬI DỮ LIỆU ↓",
+          layout: "stack",
+          items: [
+            "7 · Application",
+            "6 · Presentation",
+            "5 · Session",
+            "4 · Transport",
+            "3 · Network",
+            "2 · Data Link",
+            "1 · Physical",
+          ],
+          hl: 6,
+          caption: "Dữ liệu đi **từ trên xuống** qua 7 tầng",
+          say: "Khi gửi, dữ liệu đi từ tầng trên cùng xuống tầng vật lý. Qua mỗi tầng, nó được thêm một lớp thông tin.",
+        },
+        {
+          title: "ĐÓNG GÓI",
+          layout: "row",
+          items: ["MAC", "IP", "PORT", "DỮ LIỆU", "✓"],
+          caption: "Mỗi tầng thêm một **header**",
+          say: "Mỗi tầng bọc thêm một header ở phía trước, gồm địa chỉ MAC, địa chỉ IP, cổng, rồi mới đến dữ liệu.",
+        },
+        {
+          title: "TẦNG 2 · LIÊN KẾT DỮ LIỆU",
+          layout: "row",
+          items: ["MAC", "IP", "PORT", "DỮ LIỆU", "✓"],
+          hl: 0,
+          caption: "Gói hoàn chỉnh gọi là **frame**",
+          say: "Khi xuống đến tầng hai, cả gói được bọc lại và gọi là frame.",
+        },
+      ];
+
+      const $ = (id) => document.getElementById(id);
+      let cur = 0,
+        playing = false,
+        runId = 0,
+        timer = null;
+
+      function render(n) {
+        cur = n;
+        const s = SCENES[n],
+          my = runId;
+        $("title").textContent = s.title;
+        $("stage").className = s.layout === "stack" ? "stack" : "";
+        $("stage").innerHTML = "";
+        s.items.forEach((t, k) => {
+          const d = document.createElement("div");
+          d.className = "chip c" + (k % 5);
+          d.textContent = t;
+          $("stage").appendChild(d);
+          setTimeout(
+            () => {
+              if (my === runId) d.classList.add("show");
+            },
+            300 + k * 350,
+          );
+        });
+        if (s.hl !== undefined)
+          setTimeout(
+            () => {
+              if (my === runId) $("stage").children[s.hl].classList.add("hl");
+            },
+            500 + s.items.length * 350,
+          );
+        $("caption").innerHTML =
+          "<div>" + s.caption.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>") + "</div>";
+        $("bar").style.width = ((n + 1) / SCENES.length) * 100 + "%";
+      }
+
+      function speak(text, done) {
+        speechSynthesis.cancel();
+        const u = new SpeechSynthesisUtterance(text);
+        const v = speechSynthesis
+          .getVoices()
+          .find((v) => v.lang.toLowerCase().startsWith("vi"));
+        u.lang = "vi-VN";
+        if (v) u.voice = v;
+        $("note").textContent = v
+          ? ""
+          : "Máy chưa có giọng tiếng Việt (nên dùng Microsoft Edge).";
+        u.onend = done;
+        u.onerror = done;
+        speechSynthesis.speak(u);
+      }
+
+      function go(n, auto) {
+        runId++;
+        clearTimeout(timer);
+        speechSynthesis.cancel();
+        if (n >= SCENES.length) {
+          playing = false;
+          $("play").textContent = "▶ Phát lại";
+          return;
+        }
+        render(Math.max(0, n));
+        if (auto) {
+          const my = runId;
+          speak(SCENES[cur].say, () => {
+            if (my === runId && playing)
+              timer = setTimeout(() => go(cur + 1, true), 600);
+          });
+        }
+      }
+
+      $("play").onclick = () => {
+        if (playing) {
+          playing = false;
+          runId++;
+          clearTimeout(timer);
+          speechSynthesis.cancel();
+          $("play").textContent = "▶ Phát";
+          return;
+        }
+        playing = true;
+        $("play").textContent = "⏸ Dừng";
+        go(
+          cur >= SCENES.length - 1 &&
+            !$("bar").style.width.startsWith("0") &&
+            cur === SCENES.length - 1
+            ? 0
+            : cur,
+          true,
+        );
+      };
+      $("prev").onclick = () => go(cur - 1, playing);
+      $("next").onclick = () =>
+        go(Math.min(cur + 1, SCENES.length - 1), playing);
+      speechSynthesis.onvoiceschanged = () => {};
+      render(0);
+    </script>
+  </body>
+</html>

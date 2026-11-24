@@ -241,6 +241,95 @@ def save_workspace_html(content):
     webbrowser.open(Path(html_path).resolve().as_uri())
     return html_path
 
+def build_scenes_prompt(text):
+    return (
+        "Bạn là người làm video giải thích kiểu TikTok cho sinh viên CNTT.\n"
+        "Chia nội dung sau thành 5 đến 8 cảnh nối tiếp, mỗi cảnh một ý duy nhất. "
+        "Chỉ trả về JSON hợp lệ, không có chữ nào ngoài JSON, không dùng khối ```. Dạng:\n"
+        '{"scenes":[{"title":"...","layout":"stack","items":["..."],"hl":0,'
+        '"caption":"... **từ khóa** ...","say":"..."}]}\n'
+        "Quy tắc:\n"
+        "- title: tiếng Việt in hoa, tối đa 6 từ.\n"
+        "- layout: 'stack' (khối xếp dọc, dùng cho tầng/lớp/thứ tự) hoặc "
+        "'row' (khối xếp ngang, dùng cho các phần ghép thành một gói).\n"
+        "- items: 2 đến 7 khối, mỗi khối tối đa 3 từ.\n"
+        "- hl: số thứ tự (từ 0) của khối cần nhấn mạnh; bỏ trường này nếu không cần.\n"
+        "- caption: một câu dưới 12 từ, bọc đúng một từ khóa bằng **.\n"
+        "- say: 1 đến 2 câu tiếng Việt như đang nói chuyện, dễ hiểu, không dùng ký hiệu markdown.\n"
+        "- Đi từ bức tranh lớn đến chi tiết, gồm cả phần người học chưa biết để hỏi. "
+        "Cảnh cuối là 'CÓ THỂ BẠN CHƯA BIẾT' với một điều nên hỏi tiếp.\n"
+        "- Không chắc thì bỏ, không bịa.\n\n"
+        f"Chủ đề: {text}"
+    )
+
+
+def parse_scenes(content):
+    text = content.strip().strip("`").strip()
+    if text.lower().startswith("json"):
+        text = text[4:]
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        start, end = text.find("{"), text.rfind("}")
+        if start == -1 or end <= start:
+            return None
+        try:
+            data = json.loads(text[start:end + 1])
+        except json.JSONDecodeError:
+            return None
+    scenes = data.get("scenes") if isinstance(data, dict) else None
+    if not isinstance(scenes, list) or not scenes:
+        return None
+    clean = []
+    for s in scenes:
+        if not isinstance(s, dict):
+            return None
+        items = s.get("items")
+        if not all(isinstance(s.get(k), str) and s[k].strip() for k in ("title", "caption", "say")):
+            return None
+        if not isinstance(items, list) or not 1 <= len(items) <= 8 or any(not isinstance(i, str) for i in items):
+            return None
+        scene = {
+            "title": s["title"],
+            "layout": "stack" if s.get("layout") == "stack" else "row",
+            "items": items,
+            "caption": s["caption"],
+            "say": s["say"],
+        }
+        hl = s.get("hl")
+        if isinstance(hl, int) and not isinstance(hl, bool) and 0 <= hl < len(items):
+            scene["hl"] = hl
+        clean.append(scene)
+    return clean
+
+
+def save_scenes_html(scenes):
+    template = Path("vis_player.html")
+    if not template.exists():
+        print("Thiếu file vis_player.html")
+        return None
+    os.makedirs("workspace", exist_ok=True)
+    data = json.dumps(scenes, ensure_ascii=False).replace("</", "<\\/")
+    html = template.read_text(encoding="utf-8").replace(
+        "<script>",
+        "<script>window.SCENES_OVERRIDE = " + data + ";</script>\n<script>",
+        1,
+    )
+    path = Path("workspace") / "vis_play.html"
+    path.write_text(html, encoding="utf-8")
+    webbrowser.open(path.resolve().as_uri())
+    return str(path)
+
+
+def play(gemini_client, openai_clients, text):
+    prompt = build_scenes_prompt(text)
+    reply, model_name, meta = ask(gemini_client, openai_clients, [], prompt, use_history=False, route_text=text)
+    scenes = parse_scenes(reply)
+    if scenes is None:
+        print("Không đọc được JSON cảnh từ model.")
+    else:
+        save_scenes_html(scenes)
+    return reply, model_name, meta
 
 def visualize(gemini_client, openai_clients, text):
     prompt = build_vis_prompt(text)
