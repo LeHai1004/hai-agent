@@ -6,6 +6,7 @@ from google import genai
 from google.genai import types
 from config import MODELS
 from tools import TOOLS
+import re
 
 SYSTEM_INSTRUCTION = (
     "Trả lời bằng tiếng Việt, ngắn gọn. "
@@ -103,19 +104,40 @@ def run_openai(client, model, conv, max_rounds=5):
             conv.append({"role": "tool", "tool_call_id": c.id, "content": str(result)})
     return "Đã gọi tool quá nhiều lần mà chưa có câu trả lời.", total
 
-HARD_WORDS = (
-    "code", "lập trình", "viết", "giải thích", "phân tích", "so sánh",
-    "tại sao", "bug", "lỗi", "python", "thuật toán", "tóm tắt", "dịch",
-    "suy luận", "chứng minh", "tối ưu", "thiết kế",
+
+
+STRONG = (
+    "chứng minh", "thuật toán", "tối ưu", "thiết kế", "kiến trúc",
+    "debug", "bug", "refactor", "so sánh", "phân tích", "tại sao",
 )
+MEDIUM = ("code", "lập trình", "giải thích", "lỗi", "tóm tắt", "python", "java")
+
+
+def has_word(text, w):
+    return re.search(rf"\b{re.escape(w)}\b", text) is not None
+
+
+def score_question(text):
+    t = text.lower()
+    s = 0
+    if len(text) > 200:
+        s += 2
+    if len(text) > 600:
+        s += 2
+    if "```" in text or re.search(r"traceback|\bdef \w+\(|\bclass \w+", t):
+        s += 3
+    s += sum(2 for w in STRONG if has_word(t, w))
+    s += sum(1 for w in MEDIUM if has_word(t, w))
+    return s
+
 
 def order_models(text):
-    t = text.lower()
-    if len(text) > 200 or any(w in t for w in HARD_WORDS):
+    if score_question(text) >= 3:
         return list(MODELS)
     lite = [m for m in MODELS if "lite" in m[1]]
     rest = [m for m in MODELS if m not in lite]
     return lite + rest
+
 def ask(gemini_client, openai_clients, messages, text, use_history=True, route_text=None):
     last_error = None
     for provider, model in order_models(route_text or text):
