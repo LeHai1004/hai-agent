@@ -151,6 +151,11 @@ body.panel-open #panel{display:flex}
 .pin-suggestion button{padding:4px 8px;font-size:.78rem;border-radius:6px}
 .pin-suggestion-status{color:#aeb4c0;font-size:.8rem}
 pre{background:#111214;padding:12px;border-radius:8px;overflow-x:auto}
+h3,h4,h5{font-weight:700;line-height:1.3;margin:8px 0 4px}
+h3{font-size:1.15rem}
+h4{font-size:1.08rem}
+h5{font-size:1rem}
+hr{border:0;border-top:1px solid #555;opacity:.6;margin:8px 0}
 code{background:#111214;padding:1px 5px;border-radius:4px;font-family:Consolas,monospace}
 pre code{padding:0}
 a{color:#7cb2ff}
@@ -207,15 +212,24 @@ log.addEventListener("click", event => {
 });
 function render(t){
   const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  const inline = line => line
+    .replace(/`([^`]+)`/g,"<code>$1</code>")
+    .replace(/\\*\\*([^*]+)\\*\\*/g,"<b>$1</b>")
+    .replace(/(^|[\\s:])\\/bilingual\\b/g,'$1<a href="/bilingual">/bilingual</a>')
+    .replace(/(^|[\\s:])\\/pdfview\\/(\\d+)\\b/g,'$1<a href="/pdfview/$2">/pdfview/$2</a>')
+    .replace(/(^|[\\s:])\\/(vis-play|vis-view)\\b/g,'$1<a href="/$2">/$2</a>')
+    .replace(/(https?:\\/\\/[^\\s<"']+)/g,'<a href="$1" target="_blank" rel="noopener">$1</a>');
   return esc(t).split("```").map((p,i) => i % 2
     ? "<pre><code>" + p.replace(/^[a-zA-Z0-9]*\\n/,"") + "</code></pre>"
-    : p.replace(/`([^`]+)`/g,"<code>$1</code>")
-       .replace(/\\*\\*([^*]+)\\*\\*/g,"<b>$1</b>")
-       .replace(/(^|[\\s:])\\/bilingual\\b/g,'$1<a href="/bilingual">/bilingual</a>')
-       .replace(/(^|[\\s:])\\/pdfview\\/(\\d+)\\b/g,'$1<a href="/pdfview/$2">/pdfview/$2</a>')
-       .replace(/(^|[\\s:])\\/(vis-play|vis-view)\\b/g,'$1<a href="/$2">/$2</a>')
-       .replace(/(https?:\\/\\/[^\\s<"']+)/g,'<a href="$1" target="_blank" rel="noopener">$1</a>')
-       .replace(/\\n/g,"<br>")).join("");
+    : p.split("\\n").map(line => {
+        const heading = line.match(/^(#{1,3}) (.+)$/);
+        if (heading) {
+          const level = 2 + heading[1].length;
+          return `<h${level}>${inline(heading[2])}</h${level}>`;
+        }
+        if (line === "---") return "<hr>";
+        return inline(line);
+      }).join("<br>")).join("");
 }
 function addMsg(role, text, meta, imageUrl){
   const d = document.createElement("div");
