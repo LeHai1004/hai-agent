@@ -1,4 +1,5 @@
 import os
+import re
 import threading
 import time
 import uuid
@@ -38,6 +39,23 @@ chat_jobs_lock = threading.Lock()
 chat_jobs = {}
 active_job_id = None
 confirm_context = threading.local()
+
+
+def looks_personal(text):
+    text = text.strip()
+    if not 12 <= len(text) <= 200 or text.startswith("/"):
+        return False
+    lowered = text.lower()
+    if lowered.endswith("?") or any(
+        phrase in lowered for phrase in ("là gì", "như thế nào", "tại sao")
+    ):
+        return False
+    patterns = (
+        r"\b(tôi|mình|em)\s+(đang|vừa|sắp|đã)?\s*(học|làm|dùng|thích|muốn|cần|tên|ở|là)\b",
+        r"(tên (tôi|mình)|dự án của (tôi|mình)|mục tiêu của (tôi|mình))",
+        r"(từ giờ|luôn luôn|lần sau|nhớ giúp)",
+    )
+    return any(re.search(pattern, lowered) for pattern in patterns)
 
 
 def make_clients():
@@ -129,6 +147,9 @@ body.panel-open #panel{display:flex}
 .confirmation{padding:12px;background:#24262b;border:1px solid #4b5060;border-radius:10px;white-space:pre-wrap}
 .confirmation-actions{display:flex;gap:8px;margin-top:10px}
 .confirmation-status{color:#aeb4c0;font-size:.85rem;margin-top:8px}
+.pin-suggestion{display:flex;align-items:center;gap:8px;margin-top:8px}
+.pin-suggestion button{padding:4px 8px;font-size:.78rem;border-radius:6px}
+.pin-suggestion-status{color:#aeb4c0;font-size:.8rem}
 pre{background:#111214;padding:12px;border-radius:8px;overflow-x:auto}
 code{background:#111214;padding:1px 5px;border-radius:4px;font-family:Consolas,monospace}
 pre code{padding:0}
@@ -214,6 +235,50 @@ function addMsg(role, text, meta, imageUrl){
   log.scrollTop = log.scrollHeight;
   return d;
 }
+function addPinSuggestion(message, suggestion){
+  const container = document.createElement("div");
+  container.className = "pin-suggestion";
+  const actions = document.createElement("div");
+  const pinButton = document.createElement("button");
+  pinButton.type = "button";
+  pinButton.textContent = "📌 Ghim câu này";
+  const dismissButton = document.createElement("button");
+  dismissButton.type = "button";
+  dismissButton.className = "ghost";
+  dismissButton.textContent = "✕";
+  dismissButton.setAttribute("aria-label", "Bỏ qua gợi ý ghim");
+  const status = document.createElement("span");
+  status.className = "pin-suggestion-status";
+  pinButton.addEventListener("click", async () => {
+    pinButton.disabled = true;
+    status.textContent = "Đang ghim...";
+    try {
+      const response = await fetch("/api/chat", {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({text:"/pin " + suggestion})
+      });
+      let data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Không thể ghim");
+      if (data.pending) data = await waitForChat(data.request_id);
+      if (typeof data.reply === "string" && data.reply.startsWith("Đã ghim #")) {
+        status.textContent = "Đã ghim";
+        actions.hidden = true;
+      } else {
+        status.textContent = data.reply || "Không thể ghim";
+        pinButton.disabled = false;
+      }
+    } catch (e) {
+      status.textContent = "Lỗi: " + e.message;
+      pinButton.disabled = false;
+    }
+  });
+  dismissButton.addEventListener("click", () => container.remove());
+  actions.className = "pin-suggestion-actions";
+  actions.append(pinButton, dismissButton);
+  container.append(actions, status);
+  message.appendChild(container);
+}
 function addConfirmation(requestId, confirmation){
   const card = document.createElement("div");
   card.className = "msg bot confirmation";
@@ -295,7 +360,8 @@ async function send(){
     wait.remove();
     if (data.new) log.innerHTML = "";
     const reply = data.reply || data.error || "(không có phản hồi)";
-    addMsg("bot", reply, data.model || "");
+    const botMessage = addMsg("bot", reply, data.model || "");
+    if (data.suggest_pin) addPinSuggestion(botMessage, data.suggest_pin);
     if (reply.includes("/bilingual")) openPanel("/bilingual", "Dịch song ngữ");
     const pdfMatch = reply.match(/\\/pdfview\\/(\\d+)\\b/);
     if (pdfMatch) openPanel(`/pdfview/${pdfMatch[1]}`, `PDF trang ${pdfMatch[1]}`);
@@ -558,7 +624,10 @@ def _process_chat_message(text):
     messages.append({"role": "model", "text": saved})
     save_history(messages)
     record_usage(usage, model_key, meta)
-    return {"reply": saved, "model": model_key, "usage": format_usage(usage, model_key)}
+    result = {"reply": saved, "model": model_key, "usage": format_usage(usage, model_key)}
+    if looks_personal(text):
+        result["suggest_pin"] = text
+    return result
 
 
 def _run_chat_job(job_id, text):
@@ -608,7 +677,10 @@ def chat():
         active_job_id = job_id
         threading.Thread(
             target=_run_chat_job, args=(job_id, text), daemon=True).start()
-    return jsonify(pending=True, request_id=job_id), 202
+    response = {"pending": True, "request_id": job_id}
+    if looks_personal(text):
+        response["suggest_pin"] = text
+    return jsonify(response), 202
 
 
 @app.get("/api/chat/status/<request_id>")
@@ -652,6 +724,14 @@ def confirm():
 
 
 if __name__ == "__main__":
+    examples = (
+        ("Tôi đang làm đồ án chatbot cá nhân bằng Python", True),
+        ("tên tôi là Hải", True),
+        ("TCP là gì?", False),
+        ("hello", False),
+    )
+    for text, expected in examples:
+        print(f"{text}: {looks_personal(text)} (expected {expected})")
     url = "http://127.0.0.1:5000"
     threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     app.run(host="127.0.0.1", port=5000)
