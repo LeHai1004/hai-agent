@@ -102,16 +102,17 @@ DATA.vocab.forEach(v => {
 </script></div></body></html>"""
 
 
-def save_bilingual_html(data):
+def save_bilingual_html(data, open_browser=True):
     os.makedirs("workspace", exist_ok=True)
     payload = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
     path = Path("workspace") / "bilingual.html"
     path.write_text(PAGE.replace("__DATA__", payload), encoding="utf-8")
-    webbrowser.open(path.resolve().as_uri())
+    if open_browser:
+        webbrowser.open(path.resolve().as_uri())
     return str(path)
 
 
-def translate(gemini_client, openai_clients, text):
+def translate(gemini_client, openai_clients, text, open_browser=True):
     reply, model_name, meta = ask(
         gemini_client, openai_clients, [], build_en_prompt(text),
         use_history=False, route_text=text,
@@ -119,7 +120,7 @@ def translate(gemini_client, openai_clients, text):
     data = parse_translation(reply)
     if data is None:
         return reply, model_name, meta
-    save_bilingual_html(data)
+    save_bilingual_html(data, open_browser=open_browser)
     lines = []
     for p in data["pairs"]:
         lines.append(f"EN: {p['en']}")

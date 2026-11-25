@@ -4,7 +4,7 @@ import webbrowser
 
 from pins import add_pin, format_pins, load_pins, remove_pin
 from dotenv import load_dotenv
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 from google import genai
 from google.genai import types
 from openai import OpenAI
@@ -12,6 +12,7 @@ from openai import OpenAI
 from history import load_history, save_history
 from llm import ask
 from search import build_prompt, web_search
+from translate import translate
 from usage import format_usage, load_usage, record_usage
 
 load_dotenv()
@@ -53,6 +54,15 @@ button{border:0;border-radius:8px;padding:9px 16px;background:#3b82f6;color:#fff
 button:disabled{background:#4b5060;cursor:not-allowed}
 .ghost{background:#2e3036}
 #log{flex:1;overflow-y:auto;padding:20px;max-width:860px;width:100%;margin:0 auto}
+#layout{display:flex;flex:1;min-height:0;width:100%}
+#chat{display:flex;flex:1 1 100%;flex-direction:column;min-width:0}
+body.panel-open #chat{flex:0 0 45%}
+#panel{display:none;flex:0 0 55%;flex-direction:column;min-width:0;min-height:0;border-left:1px solid #2e3036;background:#202125}
+body.panel-open #panel{display:flex}
+.panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 12px;border-bottom:1px solid #2e3036}
+.panel-head b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#close-panel{font-size:1.1rem;padding:7px 12px}
+#panel-frame{flex:1;width:100%;min-height:0;border:0;background:#fff}
 .msg{margin-bottom:16px;line-height:1.6;word-wrap:break-word}
 .user{background:#2a3a55;padding:10px 14px;border-radius:12px;margin-left:auto;width:fit-content;max-width:80%;white-space:pre-wrap}
 .bot{padding:4px 2px}
@@ -67,22 +77,50 @@ textarea{flex:1;resize:none;height:56px;padding:12px;border-radius:10px;border:1
 .hint{max-width:860px;margin:6px auto 0;color:#8b8f99;font-size:.78rem}
 </style></head><body>
 <header><b>Hai Agent</b><button class="ghost" id="new">Chat mới</button></header>
+<main id="layout">
+<section id="chat">
 <div id="log"></div>
 <footer>
 <div class="row"><textarea id="box" placeholder="Nhắn tin... (Enter gửi, Shift+Enter xuống dòng, /web câu hỏi để tìm web)"></textarea>
 <button id="send">Gửi</button></div>
 <div class="hint" id="usage"></div>
 </footer>
+</section>
+<aside id="panel">
+<div class="panel-head"><b id="panel-title"></b><button class="ghost" id="close-panel" aria-label="Đóng panel">✕</button></div>
+<iframe id="panel-frame" title="Nội dung"></iframe>
+</aside>
+</main>
 <script>
 const log = document.getElementById("log");
 const box = document.getElementById("box");
 const sendBtn = document.getElementById("send");
+const panelFrame = document.getElementById("panel-frame");
+const panelTitle = document.getElementById("panel-title");
+function openPanel(url, title){
+  panelTitle.textContent = title;
+  panelFrame.src = url + (url.includes("?") ? "&" : "?") + "t=" + Date.now();
+  document.body.classList.add("panel-open");
+}
+document.getElementById("close-panel").addEventListener("click", () => {
+  document.body.classList.remove("panel-open");
+});
+const panelTitles = {"/bilingual":"Dịch song ngữ","/read":"Đọc tài liệu","/vis":"Trực quan hóa"};
+log.addEventListener("click", event => {
+  const link = event.target.closest("a");
+  if (!link) return;
+  const href = link.getAttribute("href");
+  if (!panelTitles[href]) return;
+  event.preventDefault();
+  openPanel(href, panelTitles[href]);
+});
 function render(t){
   const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
   return esc(t).split("```").map((p,i) => i % 2
     ? "<pre><code>" + p.replace(/^[a-zA-Z0-9]*\\n/,"") + "</code></pre>"
     : p.replace(/`([^`]+)`/g,"<code>$1</code>")
        .replace(/\\*\\*([^*]+)\\*\\*/g,"<b>$1</b>")
+       .replace(/(^|[\\s:])\\/bilingual\\b/g,'$1<a href="/bilingual">/bilingual</a>')
        .replace(/(https?:\\/\\/[^\\s<"']+)/g,'<a href="$1" target="_blank" rel="noopener">$1</a>')
        .replace(/\\n/g,"<br>")).join("");
 }
@@ -107,7 +145,9 @@ async function send(){
     const data = await r.json();
     wait.remove();
     if (data.new) log.innerHTML = "";
-    addMsg("bot", data.reply || data.error || "(không có phản hồi)", data.model || "");
+    const reply = data.reply || data.error || "(không có phản hồi)";
+    addMsg("bot", reply, data.model || "");
+    if (reply.includes("/bilingual")) openPanel("/bilingual", "Dịch song ngữ");
     if (data.usage) document.getElementById("usage").textContent = data.usage;
   } catch (e) {
     wait.remove();
@@ -129,6 +169,11 @@ box.focus();
 @app.get("/")
 def index():
     return PAGE
+
+
+@app.get("/bilingual")
+def bilingual():
+    return send_from_directory("workspace", "bilingual.html")
 
 
 @app.get("/api/history")
@@ -156,6 +201,20 @@ def chat():
             else:
                 reply = add_pin(pins, text[5:])
             return jsonify(reply=reply, model="")
+        if text == "/en" or text.startswith("/en "):
+            sentence = text[3:].strip()
+            if not sentence:
+                return jsonify(reply="Dùng: /en câu cần dịch", model="")
+            try:
+                reply, model_key, _ = translate(
+                    gemini_client, openai_clients, sentence, open_browser=False)
+            except Exception as e:
+                return jsonify(reply=f"Lỗi dịch: {e}", model="")
+            reply = reply.replace(
+                "(Đã mở workspace/bilingual.html)",
+                "Đã dịch xong. Mở bản song ngữ: /bilingual",
+            )
+            return jsonify(reply=reply, model=model_key)
         question, prompt, sources = text, text, []
         if text.startswith("/web "):
             question = text[5:].strip()
