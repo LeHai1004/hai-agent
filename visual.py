@@ -48,7 +48,7 @@ def save_workspace_vis(content):
     return path
 
 
-def save_workspace_html(content):
+def save_workspace_html(content, open_browser=True):
     os.makedirs("workspace", exist_ok=True)
     html_path = os.path.join("workspace", "vis.html")
 
@@ -238,7 +238,8 @@ def save_workspace_html(content):
     with open(html_path, "w", encoding="utf-8") as f:
         f.write(html_content)
 
-    webbrowser.open(Path(html_path).resolve().as_uri())
+    if open_browser:
+        webbrowser.open(Path(html_path).resolve().as_uri())
     return html_path
 
 def build_scenes_prompt(text):
@@ -303,7 +304,7 @@ def parse_scenes(content):
     return clean
 
 
-def save_scenes_html(scenes):
+def save_scenes_html(scenes, open_browser=True):
     template = Path("vis_player.html")
     if not template.exists():
         print("Thiếu file vis_player.html")
@@ -317,23 +318,23 @@ def save_scenes_html(scenes):
     )
     path = Path("workspace") / "vis_play.html"
     path.write_text(html, encoding="utf-8")
-    webbrowser.open(path.resolve().as_uri())
+    if open_browser:
+        webbrowser.open(path.resolve().as_uri())
     return str(path)
 
-
-def play(gemini_client, openai_clients, text):
+def play(gemini_client, openai_clients, text, open_browser=True):
     prompt = build_scenes_prompt(text)
     reply, model_name, meta = ask(gemini_client, openai_clients, [], prompt, use_history=False, route_text=text)
     scenes = parse_scenes(reply)
     if scenes is None:
         print("Không đọc được JSON cảnh từ model.")
     else:
-        save_scenes_html(scenes)
+        save_scenes_html(scenes, open_browser=open_browser)
     return reply, model_name, meta
 
-def visualize(gemini_client, openai_clients, text):
+def visualize(gemini_client, openai_clients, text, open_browser=True):
     prompt = build_vis_prompt(text)
     reply, model_name, meta = ask(gemini_client, openai_clients, [], prompt, use_history=False, route_text=text)
     save_workspace_vis(reply)
-    save_workspace_html(reply)
+    save_workspace_html(reply, open_browser=open_browser)
     return reply, model_name, meta

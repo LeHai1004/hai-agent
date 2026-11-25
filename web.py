@@ -22,6 +22,7 @@ from pdfread import read_pdf_page
 from search import build_prompt, web_search
 from translate import translate
 from usage import format_usage, load_usage, record_usage
+from visual import play, visualize
 
 load_dotenv()
 app = Flask(__name__)
@@ -151,7 +152,7 @@ textarea{flex:1;resize:none;height:56px;padding:12px;border-radius:10px;border:1
 </section>
 <aside id="panel">
 <div class="panel-head"><b id="panel-title"></b><button class="ghost" id="close-panel" aria-label="Đóng panel">✕</button></div>
-<iframe id="panel-frame" title="Nội dung"></iframe>
+<iframe id="panel-frame" title="Nội dung" allow="autoplay; speech-synthesis"></iframe>
 </aside>
 </main>
 <script>
@@ -171,7 +172,7 @@ function openPanel(url, title){
 document.getElementById("close-panel").addEventListener("click", () => {
   document.body.classList.remove("panel-open");
 });
-const panelTitles = {"/bilingual":"Dịch song ngữ","/read":"Đọc tài liệu","/vis":"Trực quan hóa"};
+const panelTitles = {"/bilingual":"Dịch song ngữ","/read":"Đọc tài liệu","/vis":"Trực quan hóa","/vis-play":"Giải thích động","/vis-view":"Sơ đồ giải thích"};
 log.addEventListener("click", event => {
   const link = event.target.closest("a");
   if (!link) return;
@@ -191,6 +192,7 @@ function render(t){
        .replace(/\\*\\*([^*]+)\\*\\*/g,"<b>$1</b>")
        .replace(/(^|[\\s:])\\/bilingual\\b/g,'$1<a href="/bilingual">/bilingual</a>')
        .replace(/(^|[\\s:])\\/pdfview\\/(\\d+)\\b/g,'$1<a href="/pdfview/$2">/pdfview/$2</a>')
+       .replace(/(^|[\\s:])\\/(vis-play|vis-view)\\b/g,'$1<a href="/$2">/$2</a>')
        .replace(/(https?:\\/\\/[^\\s<"']+)/g,'<a href="$1" target="_blank" rel="noopener">$1</a>')
        .replace(/\\n/g,"<br>")).join("");
 }
@@ -297,6 +299,8 @@ async function send(){
     if (reply.includes("/bilingual")) openPanel("/bilingual", "Dịch song ngữ");
     const pdfMatch = reply.match(/\\/pdfview\\/(\\d+)\\b/);
     if (pdfMatch) openPanel(`/pdfview/${pdfMatch[1]}`, `PDF trang ${pdfMatch[1]}`);
+    if (reply.includes("/vis-play")) openPanel("/vis-play", "Giải thích động");
+    if (reply.includes("/vis-view")) openPanel("/vis-view", "Sơ đồ giải thích");
     if (data.usage) document.getElementById("usage").textContent = data.usage;
   } catch (e) {
     wait.remove();
@@ -354,6 +358,16 @@ def bilingual():
 @app.get("/pdfview/<int:page_no>")
 def pdf_view(page_no):
     return send_from_directory("workspace", f"pdf_trang{page_no}.html")
+
+
+@app.get("/vis-play")
+def vis_play():
+    return send_from_directory("workspace", "vis_play.html")
+
+
+@app.get("/vis-view")
+def vis_view():
+    return send_from_directory("workspace", "vis.html")
 
 
 @app.post("/upload")
@@ -426,6 +440,32 @@ def _process_chat_message(text):
             "Đã dịch xong. Mở bản song ngữ: /bilingual",
         )
         return {"reply": reply, "model": model_key}
+    if text == "/play" or text.startswith("/play "):
+        play_content = text[5:].strip()
+        if not play_content:
+            return {"reply": "Dùng: /play chủ đề cần giải thích", "model": ""}
+        try:
+            reply, model_key, _ = play(
+                gemini_client, openai_clients, play_content, open_browser=False)
+        except Exception as e:
+            return {"reply": f"Lỗi tạo video: {e}", "model": ""}
+        return {
+            "reply": f"{reply}\n\nMở hoạt hình: /vis-play",
+            "model": model_key,
+        }
+    if text == "/vis" or text.startswith("/vis "):
+        vis_content = text[4:].strip()
+        if not vis_content:
+            return {"reply": "Dùng: /vis câu hỏi hoặc đoạn code", "model": ""}
+        try:
+            reply, model_key, _ = visualize(
+                gemini_client, openai_clients, vis_content, open_browser=False)
+        except Exception as e:
+            return {"reply": f"Lỗi trực quan hóa: {e}", "model": ""}
+        return {
+            "reply": f"{reply}\n\nMở sơ đồ: /vis-view",
+            "model": model_key,
+        }
     if text == "/read" or text.startswith("/read "):
         args = text[5:].strip()
         page_no = 1
