@@ -10,6 +10,7 @@ import tools
 from pins import add_pin, format_pins, load_pins, remove_pin
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request, send_from_directory
+from transfer import EXPORT_DIR, export_chat, import_chat, list_exports
 from google import genai
 from google.genai import types
 from openai import OpenAI
@@ -150,6 +151,9 @@ body.panel-open #panel{display:flex}
 .pin-suggestion{display:flex;align-items:center;gap:8px;margin-top:8px}
 .pin-suggestion button{padding:4px 8px;font-size:.78rem;border-radius:6px}
 .pin-suggestion-status{color:#aeb4c0;font-size:.8rem}
+.export-list{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+.export-list button{padding:6px 10px;font-size:.85rem}
+.export-list-status{color:#aeb4c0;font-size:.8rem;margin-top:8px}
 pre{background:#111214;padding:12px;border-radius:8px;overflow-x:auto}
 h3,h4,h5{font-weight:700;line-height:1.3;margin:8px 0 4px}
 h3{font-size:1.15rem}
@@ -218,6 +222,7 @@ function render(t){
     .replace(/(^|[\\s:])\\/bilingual\\b/g,'$1<a href="/bilingual">/bilingual</a>')
     .replace(/(^|[\\s:])\\/pdfview\\/(\\d+)\\b/g,'$1<a href="/pdfview/$2">/pdfview/$2</a>')
     .replace(/(^|[\\s:])\\/(vis-play|vis-view)\\b/g,'$1<a href="/$2">/$2</a>')
+    .replace(/(^|[\\s:])\\/download\\/([^\\s<"']+)/g,'$1<a href="/download/$2">/download/$2</a>')
     .replace(/(https?:\\/\\/[^\\s<"']+)/g,'<a href="$1" target="_blank" rel="noopener">$1</a>');
   return esc(t).split("```").map((p,i) => i % 2
     ? "<pre><code>" + p.replace(/^[a-zA-Z0-9]*\\n/,"") + "</code></pre>"
@@ -291,6 +296,48 @@ function addPinSuggestion(message, suggestion){
   actions.className = "pin-suggestion-actions";
   actions.append(pinButton, dismissButton);
   container.append(actions, status);
+  message.appendChild(container);
+}
+function addExportButtons(message, exports){
+  const container = document.createElement("div");
+  container.className = "export-list";
+  const status = document.createElement("div");
+  status.className = "export-list-status";
+  const buttons = exports.map(name => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = name + ".json";
+    button.addEventListener("click", async () => {
+      buttons.forEach(item => { item.disabled = true; });
+      status.textContent = "Đang nạp...";
+      try {
+        const response = await fetch("/api/chat", {
+          method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({text:"/import " + name})
+        });
+        let data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Không thể nạp lịch sử");
+        if (data.pending) data = await waitForChat(data.request_id);
+        if (data.new && Array.isArray(data.history)) {
+          log.innerHTML = "";
+          data.history.forEach(item => addMsg(
+            item.role === "user" ? "user" : "bot", item.text
+          ));
+          addMsg("bot", data.reply || `Đã nạp ${data.history.length} tin nhắn`);
+          return;
+        }
+        status.textContent = data.reply || "Không thể nạp lịch sử";
+        buttons.forEach(item => { item.disabled = false; });
+      } catch (e) {
+        status.textContent = "Lỗi: " + e.message;
+        buttons.forEach(item => { item.disabled = false; });
+      }
+    });
+    container.appendChild(button);
+    return button;
+  });
+  container.appendChild(status);
   message.appendChild(container);
 }
 function addConfirmation(requestId, confirmation){
@@ -375,6 +422,7 @@ async function send(){
     if (data.new) log.innerHTML = "";
     const reply = data.reply || data.error || "(không có phản hồi)";
     const botMessage = addMsg("bot", reply, data.model || "");
+    if (data.exports) addExportButtons(botMessage, data.exports);
     if (data.suggest_pin) addPinSuggestion(botMessage, data.suggest_pin);
     if (reply.includes("/bilingual")) openPanel("/bilingual", "Dịch song ngữ");
     const pdfMatch = reply.match(/\\/pdfview\\/(\\d+)\\b/);
@@ -405,6 +453,7 @@ pdfFileInput.addEventListener("change", async () => {
       : null;
     if (data.kind === "pdf") box.value = `/read ${data.path} 1`;
     else if (data.kind === "image") box.value = `/img ${data.path} `;
+    else if (data.kind === "json") box.value = "/import";
     else box.value = `/file ${data.path} `;
     box.focus();
     box.setSelectionRange(box.value.length, box.value.length);
@@ -450,6 +499,13 @@ def vis_view():
     return send_from_directory("workspace", "vis.html")
 
 
+@app.get("/download/<path:filename>")
+def download_export(filename):
+    if ".." in filename or "/" in filename or "\\" in filename:
+        return "", 404
+    return send_from_directory(str(EXPORT_DIR), filename, as_attachment=True)
+
+
 @app.post("/upload")
 def upload():
     uploaded = request.files.get("file")
@@ -470,6 +526,10 @@ def upload():
     content = uploaded.stream.read(MAX_UPLOAD_SIZE + 1)
     if len(content) > MAX_UPLOAD_SIZE:
         return jsonify(error="File vượt quá giới hạn 30 MB."), 413
+    if extension == ".json":
+        EXPORT_DIR.mkdir(exist_ok=True)
+        (EXPORT_DIR / filename).write_bytes(content)
+        return jsonify(path=filename, kind="json")
     os.makedirs("workspace", exist_ok=True)
     Path("workspace", filename).write_bytes(content)
     kind = "pdf" if extension == ".pdf" else (
@@ -497,6 +557,48 @@ def _process_chat_message(text):
         messages = []
         save_history(messages)
         return {"reply": "Đã bắt đầu cuộc chat mới.", "model": "", "new": True}
+    if text.startswith("/export"):
+        try:
+            json_path, _ = export_chat(messages, text[7:])
+        except Exception as e:
+            return {"reply": f"Lỗi xuất lịch sử: {e}", "model": ""}
+        filename = json_path.name
+        return {
+            "reply": f"Đã xuất {filename}. Tải xuống: /download/{filename}",
+            "model": "",
+        }
+    if text == "/import" or text.startswith("/import "):
+        name = text[7:].strip()
+        if not name:
+            exports = [
+                export_name for export_name in list_exports()
+                if (EXPORT_DIR / f"{export_name}.json").is_file()
+            ]
+            exports.sort(
+                key=lambda export_name: (
+                    EXPORT_DIR / f"{export_name}.json"
+                ).stat().st_mtime,
+                reverse=True,
+            )
+            return {
+                "reply": "Chọn bản xuất để nạp:" if exports else "Chưa có bản xuất nào.",
+                "exports": exports[:10],
+                "model": "",
+            }
+        try:
+            imported_messages, error = import_chat(name)
+        except Exception as e:
+            return {"reply": f"Lỗi nạp lịch sử: {e}", "model": ""}
+        if error:
+            return {"reply": error, "model": ""}
+        messages = imported_messages
+        save_history(messages)
+        return {
+            "reply": f"Đã nạp {len(messages)} tin nhắn từ '{name}'.",
+            "model": "",
+            "new": True,
+            "history": messages,
+        }
     if text == "/pins" or text.startswith("/pin ") or text.startswith("/unpin"):
         pins = load_pins()
         if text == "/pins":
