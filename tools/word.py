@@ -21,7 +21,16 @@ def create_word(path: str, title: str, content: str) -> str:
     print(f"\nYêu cầu tạo Word: {path} ({note})")
     print(f"Tiêu đề: {title}")
     print(f"Nội dung xem trước (200 ký tự đầu):\n{content[:200]}")
-    if input("Cho phép tạo? (y/n): ").strip().lower() != "y":
+    from . import ConfirmationTimeoutError, confirm
+
+    try:
+        approved = confirm(
+            f"Tạo file Word '{path}' ({note})",
+            tool_name="create_word",
+        )
+    except ConfirmationTimeoutError as e:
+        return f"Lỗi xác nhận: {e}"
+    if not approved:
         return "Người dùng đã từ chối tạo file."
 
     try:

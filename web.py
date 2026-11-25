@@ -5,6 +5,7 @@ import time
 import uuid
 import webbrowser
 from pathlib import Path
+from urllib.parse import quote
 
 import tools
 from pins import add_pin, format_pins, load_pins, remove_pin
@@ -34,6 +35,7 @@ ALLOWED_UPLOAD_EXTENSIONS = {
     ".java", ".kt", ".cs", ".json", ".xml", ".html", ".css", ".js", ".sql",
 }
 IMAGE_UPLOAD_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+DOWNLOADABLE_WORKSPACE_EXTENSIONS = {".docx", ".md", ".txt"}
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_SIZE + 64 * 1024
 lock = threading.Lock()
 chat_jobs_lock = threading.Lock()
@@ -57,6 +59,19 @@ def looks_personal(text):
         r"(từ giờ|luôn luôn|lần sau|nhớ giúp)",
     )
     return any(re.search(pattern, lowered) for pattern in patterns)
+
+
+def _workspace_file_mtimes():
+    workspace = Path("workspace")
+    if not workspace.is_dir():
+        return {}
+    return {
+        path.name: path.stat().st_mtime_ns
+        for path in workspace.iterdir()
+        if path.is_file()
+        and not path.is_symlink()
+        and path.suffix.lower() in DOWNLOADABLE_WORKSPACE_EXTENSIONS
+    }
 
 
 def make_clients():
@@ -104,15 +119,19 @@ def _web_confirm_handler(tool_name, reason, suggestion):
 
     signaled = job["decision_event"].wait(max(0, deadline - time.monotonic()))
     with chat_jobs_lock:
+        timed_out = not signaled or time.monotonic() >= deadline
         approved = (
-            signaled
+            not timed_out
             and job["decision"] is True
-            and time.monotonic() < deadline
         )
         job["status"] = "running"
         job["confirmation"] = None
         job["decision"] = None
-        return approved
+    if timed_out:
+        raise tools.ConfirmationTimeoutError(
+            "Hết thời gian xác nhận sau 60 giây; thao tác đã được hủy."
+        )
+    return approved
 
 
 tools.CONFIRM_HANDLER = _web_confirm_handler
@@ -223,6 +242,7 @@ function render(t){
     .replace(/(^|[\\s:])\\/pdfview\\/(\\d+)\\b/g,'$1<a href="/pdfview/$2">/pdfview/$2</a>')
     .replace(/(^|[\\s:])\\/(vis-play|vis-view)\\b/g,'$1<a href="/$2">/$2</a>')
     .replace(/(^|[\\s:])\\/download\\/([^\\s<"']+)/g,'$1<a href="/download/$2">/download/$2</a>')
+    .replace(/(^|[\\s:])\\/files\\/([^\\s<"']+)/g,'$1<a href="/files/$2">/files/$2</a>')
     .replace(/(https?:\\/\\/[^\\s<"']+)/g,'<a href="$1" target="_blank" rel="noopener">$1</a>');
   return esc(t).split("```").map((p,i) => i % 2
     ? "<pre><code>" + p.replace(/^[a-zA-Z0-9]*\\n/,"") + "</code></pre>"
@@ -344,7 +364,9 @@ function addConfirmation(requestId, confirmation){
   const card = document.createElement("div");
   card.className = "msg bot confirmation";
   const prompt = document.createElement("div");
-  prompt.textContent = `⚠ Tool '${confirmation.tool}' ${confirmation.reason}.\nGợi ý: ${confirmation.suggestion}.\n\nVẫn chạy?`;
+  prompt.textContent = confirmation.suggestion
+    ? `⚠ Tool '${confirmation.tool}' ${confirmation.reason}.\nGợi ý: ${confirmation.suggestion}.\n\nVẫn chạy?`
+    : `⚠ Tool '${confirmation.tool}': ${confirmation.reason}\n\nVẫn chạy?`;
   const actions = document.createElement("div");
   actions.className = "confirmation-actions";
   const approve = document.createElement("button");
@@ -504,6 +526,18 @@ def download_export(filename):
     if ".." in filename or "/" in filename or "\\" in filename:
         return "", 404
     return send_from_directory(str(EXPORT_DIR), filename, as_attachment=True)
+
+
+@app.get("/files/<path:filename>")
+def download_workspace_file(filename):
+    if ".." in filename or "/" in filename or "\\" in filename:
+        return "", 404
+    if os.path.splitext(filename)[1].lower() not in DOWNLOADABLE_WORKSPACE_EXTENSIONS:
+        return "", 404
+    target = Path("workspace", filename)
+    if target.is_symlink() or not target.is_file():
+        return "", 404
+    return send_from_directory("workspace", filename, as_attachment=True)
 
 
 @app.post("/upload")
@@ -751,7 +785,22 @@ def _run_chat_job(job_id, text):
     confirm_context.job_id = job_id
     try:
         with lock:
-            result = _process_chat_message(text)
+            workspace_before = _workspace_file_mtimes()
+            try:
+                result = _process_chat_message(text)
+            except Exception as e:
+                result = {"reply": f"Lỗi xử lý: {e}", "model": ""}
+            workspace_after = _workspace_file_mtimes()
+            created_files = sorted(
+                filename
+                for filename, modified_at in workspace_after.items()
+                if workspace_before.get(filename) != modified_at
+            )
+            if created_files and isinstance(result.get("reply"), str):
+                result["reply"] += "\n\n" + "\n".join(
+                    f"📄 File đã tạo: {filename} — tải về: /files/{quote(filename, safe='')}"
+                    for filename in created_files
+                )
     except Exception as e:
         result = {"reply": f"Lỗi xử lý: {e}", "model": ""}
     finally:

@@ -1,3 +1,5 @@
+import functools
+
 from .web import web_search
 from .time_tool import get_current_time
 from .files import list_files, read_file, write_file
@@ -5,7 +7,25 @@ from .word import create_word
 from .repo import read_repo, draw_diagram
 from .github import read_github, github_stats, github_commit, github_branches
 from .webpage import read_webpage
-import functools
+
+
+class ConfirmationTimeoutError(TimeoutError):
+    pass
+
+
+def _confirm_terminal(tool_name, reason, suggestion):
+    print(f"\n⚠ Tool '{tool_name}' {reason}.")
+    if suggestion:
+        print(f"  Gợi ý: {suggestion}.")
+    return input("  Vẫn chạy? (y/n): ").strip().lower() == "y"
+
+
+CONFIRM_HANDLER = _confirm_terminal
+
+
+def confirm(message, tool_name="tool", suggestion=""):
+    return CONFIRM_HANDLER(tool_name, message, suggestion)
+
 
 TOOLS = [web_search, get_current_time, list_files, read_file, write_file, create_word,
          read_repo, draw_diagram, read_github, github_stats, github_commit, github_branches,
@@ -29,19 +49,14 @@ NANG = {
 }
 
 
-def _confirm_terminal(tool_name, ly_do, goi_y):
-    print(f"\n⚠ Tool '{tool_name}' {ly_do}.")
-    print(f"  Gợi ý: {goi_y}.")
-    return input("  Vẫn chạy? (y/n): ").strip().lower() == "y"
-
-
-CONFIRM_HANDLER = _confirm_terminal
-
-
 def _hoi_truoc(fn, ly_do, goi_y):
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
-        if not CONFIRM_HANDLER(fn.__name__, ly_do, goi_y):
+        try:
+            approved = confirm(ly_do, fn.__name__, goi_y)
+        except ConfirmationTimeoutError as e:
+            return f"Lỗi xác nhận: {e}"
+        if not approved:
             return ("Người dùng đã từ chối chạy tool này. Không gọi lại tool nào, "
                     "chỉ trả lời ngắn gọn rằng đã hủy.")
         return fn(*args, **kwargs)

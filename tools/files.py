@@ -72,8 +72,16 @@ def write_file(path: str, content: str) -> str:
     note = "file đã tồn tại, sẽ GHI ĐÈ" if target.exists() else "file mới"
     print(f"\nYêu cầu ghi file: {path} ({note})")
     print(f"Nội dung xem trước (200 ký tự đầu):\n{preview}")
-    ans = input("Cho phép ghi? (y/n): ").strip().lower()
-    if ans != "y":
+    from . import ConfirmationTimeoutError, confirm
+
+    try:
+        approved = confirm(
+            f"Ghi file '{path}' ({note})",
+            tool_name="write_file",
+        )
+    except ConfirmationTimeoutError as e:
+        return f"Lỗi xác nhận: {e}"
+    if not approved:
         return "Đã hủy ghi file theo yêu cầu người dùng (Cancelled by user)."
 
     try:
