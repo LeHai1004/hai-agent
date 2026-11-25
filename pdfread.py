@@ -64,6 +64,27 @@ def translate_blocks(gemini_client, openai_clients, blocks):
         result.extend(vi if vi else ["(không dịch được đoạn này)"] * len(part))
     return result, model_name
 
+CACHE_PATH = os.path.join("history", "pdf_cache.json")
+
+
+def load_cache():
+    try:
+        with open(CACHE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_cache(cache):
+    os.makedirs("history", exist_ok=True)
+    with open(CACHE_PATH, "w", encoding="utf-8") as f:
+        json.dump(cache, f, ensure_ascii=False)
+
+
+def cache_key(path, page_no):
+    # đổi file (dung lượng khác) thì cache cũ tự không khớp
+    return f"{os.path.basename(path)}|{os.path.getsize(path)}|{page_no}"
 
 PAGE = """<!DOCTYPE html>
 <html lang="vi"><head><meta charset="UTF-8">
@@ -116,10 +137,17 @@ def read_pdf_page(gemini_client, openai_clients, path, page_no):
     if not os.path.exists(path):
         return f"Không thấy file: {path}", ""
     blocks, total = page_blocks(path, page_no)
-    if blocks is None:
-        return f"Trang {page_no} không hợp lệ (file có {total} trang).", ""
     if not blocks:
         return f"Trang {page_no} không có chữ (có thể là ảnh scan).", ""
-    vi, model_name = translate_blocks(gemini_client, openai_clients, blocks)
+    cache = load_cache()
+    key = cache_key(path, page_no)
+    hit = cache.get(key)
+    if hit and hit.get("blocks") == blocks and len(hit.get("vi", [])) == len(blocks):
+        vi, model_name = hit["vi"], "cache, không tốn lượt"
+    else:
+        vi, model_name = translate_blocks(gemini_client, openai_clients, blocks)
+        if not any(v.startswith("(không dịch được") for v in vi):
+            cache[key] = {"blocks": blocks, "vi": vi}
+            save_cache(cache)
     out = save_pdf_html(blocks, vi, page_no, total, os.path.basename(path))
     return f"Đã dịch trang {page_no}/{total} ({len(blocks)} đoạn), mở {out}. Xem trang khác: /read {path} {page_no + 1}", model_name
