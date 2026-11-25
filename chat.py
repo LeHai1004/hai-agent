@@ -13,6 +13,7 @@ from usage import format_usage, load_usage, record_usage
 from search import build_prompt, web_search
 from llm import ask
 from pins import load_pins, add_pin, remove_pin, format_pins
+from pdfread import read_pdf_page
 
 load_dotenv()
 
@@ -158,7 +159,25 @@ def main():
             print(f"\n[Đã mở video giải thích trong trình duyệt]\n[{model_name}]\n")
             continue
 
-            
+
+        if text.startswith("/read "):
+            args = text[6:].strip()
+            page_no = 1
+            head, _, tail = args.rpartition(" ")
+            if head and tail.isdigit():
+                args, page_no = head.strip(), int(tail)
+            args = args.strip('"')
+            if not args:
+                print("Dùng: /read đường_dẫn.pdf [số trang]\n")
+                continue
+            try:
+                msg, model_name = read_pdf_page(gemini_client, openai_clients, args, page_no)
+            except Exception as e:
+                print(f"Lỗi đọc PDF: {e}\n")
+                continue
+            print(f"\n{msg}\n[{model_name}]\n")
+            continue
+
         if text.startswith("/web "):
             question = text[5:].strip()
             try:
