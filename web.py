@@ -1,10 +1,12 @@
 import html
+import json
 import os
 import re
 import threading
 import time
 import uuid
 import webbrowser
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
@@ -43,6 +45,8 @@ chat_jobs_lock = threading.Lock()
 chat_jobs = {}
 active_job_id = None
 confirm_context = threading.local()
+CHAT_DIR = Path("history", "chats")
+CHAT_ID_PATTERN = re.compile(r"\d{8}_\d{4}(?:\d{2}(?:_\d{6})?)?")
 
 
 def looks_personal(text):
@@ -75,6 +79,96 @@ def _workspace_file_mtimes():
     }
 
 
+def _chat_path(chat_id):
+    if not isinstance(chat_id, str) or not CHAT_ID_PATTERN.fullmatch(chat_id):
+        return None
+    return CHAT_DIR / f"{chat_id}.json"
+
+
+def _read_chat(path):
+    chat = json.loads(path.read_text(encoding="utf-8"))
+    if (
+        not isinstance(chat, dict)
+        or not isinstance(chat.get("title"), str)
+        or not isinstance(chat.get("updated"), str)
+        or not isinstance(chat.get("messages"), list)
+    ):
+        raise ValueError(f"Định dạng lịch sử chat không hợp lệ: {path.name}")
+    return chat
+
+
+def _list_chats():
+    if not CHAT_DIR.is_dir():
+        return []
+    chats = []
+    for path in CHAT_DIR.glob("*.json"):
+        if (
+            _chat_path(path.stem) is None
+            or path.is_symlink()
+            or not path.is_file()
+        ):
+            continue
+        chat = _read_chat(path)
+        chats.append({
+            "id": path.stem,
+            "title": chat["title"],
+            "updated": chat["updated"],
+            "current": path.stem == current_chat_id,
+        })
+    return sorted(chats, key=lambda chat: (chat["updated"], chat["id"]), reverse=True)
+
+
+def _save_current_chat():
+    global current_chat_id
+    first_user_message = next(
+        (
+            item.get("text")
+            for item in messages
+            if isinstance(item, dict)
+            and item.get("role") == "user"
+            and isinstance(item.get("text"), str)
+        ),
+        None,
+    )
+    if first_user_message is None:
+        return
+    if current_chat_id is None:
+        current_chat_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    CHAT_DIR.mkdir(parents=True, exist_ok=True)
+    path = _chat_path(current_chat_id)
+    if path is None:
+        raise ValueError("Mã cuộc chat không hợp lệ.")
+    chat = {
+        "title": first_user_message[:40],
+        "updated": datetime.now().isoformat(timespec="microseconds"),
+        "messages": messages,
+    }
+    temporary_path = path.with_suffix(".json.tmp")
+    temporary_path.write_text(
+        json.dumps(chat, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    temporary_path.replace(path)
+
+
+def _find_saved_chat(messages):
+    if not CHAT_DIR.is_dir():
+        return None
+    chats = []
+    for path in CHAT_DIR.glob("*.json"):
+        if (
+            _chat_path(path.stem) is None
+            or path.is_symlink()
+            or not path.is_file()
+        ):
+            continue
+        chat = _read_chat(path)
+        if chat["messages"] == messages:
+            chats.append((path.stem, chat))
+    if not chats:
+        return None
+    return max(chats, key=lambda item: (item[1]["updated"], item[0]))
+
+
 def make_clients():
     gemini_client = None
     if os.environ.get("GEMINI_API_KEY"):
@@ -93,7 +187,15 @@ def make_clients():
 
 
 gemini_client, openai_clients = make_clients()
+current_chat_id = None
 messages = load_history()
+if messages:
+    saved_chat = _find_saved_chat(messages)
+    if saved_chat is not None:
+        current_chat_id = saved_chat[0]
+    else:
+        # Migrate the existing single-history chat without creating empty chats.
+        _save_current_chat()
 usage = load_usage()
 
 
@@ -147,11 +249,21 @@ PAGE = """<!DOCTYPE html>
 body{margin:0;height:100vh;display:flex;flex-direction:column;background:#1b1c1f;color:#e8e8ea;font-family:system-ui,sans-serif}
 header{display:flex;justify-content:space-between;align-items:center;padding:12px 20px;border-bottom:1px solid #2e3036}
 header b{font-size:1.05rem}
+.header-actions{display:flex;gap:8px}
 button{border:0;border-radius:8px;padding:9px 16px;background:#3b82f6;color:#fff;cursor:pointer;font-size:.95rem}
 button:disabled{background:#4b5060;cursor:not-allowed}
 .ghost{background:#2e3036}
 #log{flex:1;overflow-y:auto;padding:20px;max-width:860px;width:100%;margin:0 auto}
 #layout{display:flex;flex:1;min-height:0;width:100%}
+#chat-sidebar{display:flex;flex:0 0 220px;flex-direction:column;min-height:0;background:#202125;border-right:1px solid #2e3036}
+body.sidebar-collapsed #chat-sidebar{display:none}
+.sidebar-head{padding:12px;border-bottom:1px solid #2e3036}
+#chat-list{flex:1;overflow-y:auto;padding:8px}
+.chat-item{display:flex;gap:4px;margin-bottom:6px}
+.chat-item.active .chat-open{background:#2a3a55}
+.chat-open{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;background:#2e3036;padding:8px}
+.chat-delete{flex:0 0 30px;padding:4px;background:#2e3036;color:#aaa}
+.chat-delete:hover{background:#7f1d1d;color:#fff}
 #chat{display:flex;flex:1 1 auto;flex-direction:column;min-width:0}
 #splitter{display:none;flex:0 0 6px;cursor:col-resize;background:#2e3036;z-index:2;touch-action:none;transition:background .12s,box-shadow .12s}
 body.panel-open #splitter{display:block}
@@ -192,8 +304,11 @@ footer{border-top:1px solid #2e3036;padding:14px 20px}
 textarea{flex:1;resize:none;height:56px;padding:12px;border-radius:10px;border:1px solid #3a3d45;background:#24262b;color:#e8e8ea;font-size:1rem;font-family:inherit}
 .hint{max-width:860px;margin:6px auto 0;color:#8b8f99;font-size:.78rem}
 </style></head><body>
-<header><b>Hai Agent</b><button class="ghost" id="new">Chat mới</button></header>
+<header><b>Hai Agent</b><div class="header-actions">
+<button class="ghost" id="toggle-sidebar" aria-label="Thu gọn danh sách chat">☰</button>
+<button class="ghost" id="new">Chat mới</button></div></header>
 <main id="layout">
+<aside id="chat-sidebar"><div class="sidebar-head"><b>Cuộc chat</b></div><div id="chat-list"></div></aside>
 <section id="chat">
 <div id="log"></div>
 <footer>
@@ -218,6 +333,7 @@ const panel = document.getElementById("panel");
 const panelFrame = document.getElementById("panel-frame");
 const panelTitle = document.getElementById("panel-title");
 const splitter = document.getElementById("splitter");
+const chatList = document.getElementById("chat-list");
 const attachBtn = document.getElementById("attach");
 const pdfFileInput = document.getElementById("pdf-file");
 let pendingImagePreview = null;
@@ -469,6 +585,61 @@ async function waitForChat(requestId){
     await new Promise(resolve => setTimeout(resolve, 300));
   }
 }
+async function refreshChats(){
+  const response = await fetch("/chats");
+  const chats = await response.json();
+  if (!response.ok) throw new Error(chats.error || "Không tải được danh sách chat");
+  chatList.innerHTML = "";
+  chats.forEach(chat => {
+    const row = document.createElement("div");
+    row.className = "chat-item" + (chat.current ? " active" : "");
+    const openButton = document.createElement("button");
+    openButton.type = "button";
+    openButton.className = "chat-open";
+    openButton.textContent = chat.title || "Cuộc chat";
+    openButton.title = chat.title || "Cuộc chat";
+    openButton.addEventListener("click", () => openSavedChat(chat.id));
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "chat-delete";
+    deleteButton.textContent = "×";
+    deleteButton.title = "Xóa cuộc chat";
+    deleteButton.setAttribute("aria-label", "Xóa cuộc chat");
+    deleteButton.addEventListener("click", () => deleteSavedChat(chat));
+    row.append(openButton, deleteButton);
+    chatList.appendChild(row);
+  });
+}
+async function openSavedChat(chatId){
+  try {
+    const response = await fetch(`/chats/open/${encodeURIComponent(chatId)}`, {method:"POST"});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Không mở được cuộc chat");
+    log.innerHTML = "";
+    data.messages.forEach(message => addMsg(
+      message.role === "user" ? "user" : "bot", message.text || ""
+    ));
+    document.getElementById("usage").textContent = "";
+    refreshChats().catch(error => console.error("Không tải được danh sách chat:", error));
+  } catch (error) {
+    addMsg("bot", "Lỗi mở cuộc chat: " + error.message);
+  }
+}
+async function deleteSavedChat(chat){
+  if (!window.confirm(`Xóa cuộc chat "${chat.title}"?`)) return;
+  try {
+    const response = await fetch(`/chats/delete/${encodeURIComponent(chat.id)}`, {method:"POST"});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Không xóa được cuộc chat");
+    if (data.current_deleted) {
+      log.innerHTML = "";
+      document.getElementById("usage").textContent = "";
+    }
+    refreshChats().catch(error => console.error("Không tải được danh sách chat:", error));
+  } catch (error) {
+    addMsg("bot", "Lỗi xóa cuộc chat: " + error.message);
+  }
+}
 async function send(){
   const text = box.value.trim();
   if (!text) return;
@@ -485,10 +656,10 @@ async function send(){
     if (data.pending) data = await waitForChat(data.request_id);
     wait.remove();
     if (data.new) log.innerHTML = "";
-    const reply = data.reply || data.error || "(không có phản hồi)";
-    const botMessage = addMsg("bot", reply, data.model || "");
-    if (data.exports) addExportButtons(botMessage, data.exports);
-    if (data.suggest_pin) addPinSuggestion(botMessage, data.suggest_pin);
+    const reply = text === "/new" && data.new ? "" : data.reply || data.error || "(không có phản hồi)";
+    const botMessage = reply ? addMsg("bot", reply, data.model || "") : null;
+    if (data.exports && botMessage) addExportButtons(botMessage, data.exports);
+    if (data.suggest_pin && botMessage) addPinSuggestion(botMessage, data.suggest_pin);
     if (reply.includes("/bilingual")) openPanel("/bilingual", "Dịch song ngữ");
     const pdfMatch = reply.match(/\\/pdfview\\/(\\d+)\\b/);
     if (pdfMatch) openPanel(`/pdfview/${pdfMatch[1]}`, `PDF trang ${pdfMatch[1]}`);
@@ -496,6 +667,7 @@ async function send(){
     if (reply.includes("/vis-view")) openPanel("/vis-view", "Sơ đồ giải thích");
     if (reply.includes("Mở sơ đồ: /diagram")) openPanel(`/diagram?t=${Date.now()}`, "Sơ đồ");
     if (data.usage) document.getElementById("usage").textContent = data.usage;
+    refreshChats().catch(error => console.error("Không tải được danh sách chat:", error));
   } catch (e) {
     wait.remove();
     addMsg("bot", "Lỗi kết nối tới server: " + e);
@@ -533,9 +705,13 @@ pdfFileInput.addEventListener("change", async () => {
 sendBtn.addEventListener("click", send);
 box.addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey){ e.preventDefault(); send(); } });
 document.getElementById("new").addEventListener("click", () => { box.value = "/new"; send(); });
+document.getElementById("toggle-sidebar").addEventListener("click", () => {
+  document.body.classList.toggle("sidebar-collapsed");
+});
 fetch("/api/history").then(r => r.json()).then(list => {
   list.forEach(m => addMsg(m.role === "user" ? "user" : "bot", m.text));
-});
+}).catch(error => console.error("Không tải được lịch sử chat:", error));
+refreshChats().catch(error => console.error("Không tải được danh sách chat:", error));
 box.focus();
 </script></body></html>"""
 
@@ -675,13 +851,58 @@ def workspace_image(filename):
 
 @app.get("/api/history")
 def history():
-    return jsonify(messages)
+    with lock:
+        return jsonify(messages)
+
+
+@app.get("/chats")
+def chats():
+    with lock:
+        return jsonify(_list_chats())
+
+
+@app.post("/chats/open/<chat_id>")
+def open_chat(chat_id):
+    global current_chat_id, messages
+    path = _chat_path(chat_id)
+    if path is None:
+        return jsonify(error="Không tìm thấy cuộc chat."), 404
+    with lock:
+        if path.is_symlink() or not path.is_file():
+            return jsonify(error="Không tìm thấy cuộc chat."), 404
+        _save_current_chat()
+        chat_data = _read_chat(path)
+        messages = chat_data["messages"]
+        current_chat_id = chat_id
+        save_history(messages)
+        opened_messages = messages[:]
+    return jsonify(messages=opened_messages, current_id=chat_id)
+
+
+@app.post("/chats/delete/<chat_id>")
+def delete_chat(chat_id):
+    global current_chat_id, messages
+    path = _chat_path(chat_id)
+    if path is None:
+        return jsonify(error="Không tìm thấy cuộc chat."), 404
+    with lock:
+        if path.is_symlink() or not path.is_file():
+            return jsonify(error="Không tìm thấy cuộc chat."), 404
+        path.unlink()
+        deleted_current = current_chat_id == chat_id
+        if deleted_current:
+            current_chat_id = None
+            messages = []
+            save_history(messages)
+    return jsonify(ok=True, current_deleted=deleted_current)
 
 
 def _process_chat_message(text):
-    global messages
+    global current_chat_id, messages
     if text == "/new":
+        _save_current_chat()
         messages = []
+        current_chat_id = None
         save_history(messages)
         return {"reply": "Đã bắt đầu cuộc chat mới.", "model": "", "new": True}
     if text.startswith("/export"):
@@ -900,6 +1121,7 @@ def _run_chat_job(job_id, text):
                 and isinstance(result.get("reply"), str)
             ):
                 result["reply"] += "\n\nMở sơ đồ: /diagram"
+            _save_current_chat()
     except Exception as e:
         result = {"reply": f"Lỗi xử lý: {e}", "model": ""}
     finally:
