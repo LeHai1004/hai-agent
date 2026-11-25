@@ -86,7 +86,8 @@ def draw_diagram(path: str = ".") -> str:
     if not goc.is_dir():
         return f"Không tìm thấy thư mục: {path}"
     files = [f for f in sorted(goc.rglob("*.py"))
-             if not any(p in BO_QUA for p in f.relative_to(goc).parts)]
+             if not f.name.startswith("test_")
+             and not any(p in BO_QUA for p in f.relative_to(goc).parts)]
 
     ten_module = {}
     for f in files:
@@ -108,10 +109,45 @@ def draw_diagram(path: str = ".") -> str:
             if dich and dich != rel:
                 canh.add((rel, dich))
 
-    dong = ["graph LR"]
+    dong = ["flowchart LR"]
+    groups = (
+        ("ui", "Giao diện", {"chat.py", "web.py"}),
+        ("core", "Lõi", {"llm.py", "history.py", "usage.py", "pins.py", "config.py"}),
+        ("features", "Tính năng", {
+            "translate.py", "pdfread.py", "img.py", "filechat.py", "visual.py",
+            "gitcoach.py", "transfer.py", "search.py",
+        }),
+    )
+    grouped = set()
+    for group_id, label, names in groups:
+        group_files = [
+            (f, f.relative_to(goc).as_posix())
+            for f in files
+            if f.relative_to(goc).as_posix() in names
+        ]
+        if group_files:
+            dong.append(f'    subgraph {group_id}["{label}"]')
+            for f, rel in group_files:
+                dong.append(f'        {_id(rel)}["{rel}"]')
+                grouped.add(rel)
+            dong.append("    end")
+
+    tool_files = [
+        (f, f.relative_to(goc).as_posix())
+        for f in files
+        if f.relative_to(goc).parts[0] == "tools"
+    ]
+    if tool_files:
+        dong.append('    subgraph tools["Tools"]')
+        for f, rel in tool_files:
+            dong.append(f'        {_id(rel)}["{rel}"]')
+            grouped.add(rel)
+        dong.append("    end")
+
     for f in files:
         rel = f.relative_to(goc).as_posix()
-        dong.append(f'    {_id(rel)}["{rel}"]')
+        if rel not in grouped:
+            dong.append(f'    {_id(rel)}["{rel}"]')
     for a, b in sorted(canh):
         dong.append(f"    {_id(a)} --> {_id(b)}")
     code = "\n".join(dong)

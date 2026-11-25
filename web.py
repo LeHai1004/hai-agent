@@ -532,19 +532,44 @@ def diagram():
         diagram_text = diagram_path.read_text(encoding="utf-8")
     match = re.search(r"```mermaid\s*\n(.*?)```", diagram_text, re.DOTALL)
     if match is None:
-        content = "<p>Chưa có sơ đồ</p>"
+        toolbar = ""
+        content = '<main class="diagram-viewport"><p>Chưa có sơ đồ</p></main>'
     else:
-        content = '<pre class="mermaid">' + html.escape(match.group(1)) + "</pre>"
+        toolbar = (
+            '<div class="zoom-controls">'
+            '<button type="button" data-zoom="in" aria-label="Phóng to">+</button>'
+            '<button type="button" data-zoom="out" aria-label="Thu nhỏ">−</button>'
+            '<button type="button" data-zoom="reset">Đặt lại</button>'
+            "</div>"
+        )
+        content = (
+            '<main class="diagram-viewport"><div class="diagram-canvas" '
+            'id="diagram-canvas"><pre class="mermaid">'
+            + html.escape(match.group(1))
+            + "</pre></div></main>"
+        )
     return (
         "<!DOCTYPE html><html lang=\"vi\"><head><meta charset=\"UTF-8\">"
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         "<title>Sơ đồ</title><style>"
-        "body{margin:0;padding:24px;background:#1b1c1f;color:#e8e8ea;"
-        "font-family:system-ui,sans-serif}pre{white-space:pre-wrap}"
-        ".mermaid{display:flex;justify-content:center}"
+        "*{box-sizing:border-box}body{margin:0;padding:12px;height:100vh;"
+        "display:flex;flex-direction:column;gap:8px;background:#1b1c1f;color:#e8e8ea;"
+        "font-family:system-ui,sans-serif}.zoom-controls{display:flex;gap:6px}"
+        "button{padding:4px 9px;border:0;border-radius:6px;background:#2e3036;"
+        "color:#e8e8ea;cursor:pointer}.diagram-viewport{flex:1;min-height:0;"
+        "overflow:auto}.diagram-canvas{width:max-content;min-width:100%;"
+        "transform:scale(1);transform-origin:top left}.diagram-canvas svg{max-width:none}"
+        "pre{white-space:pre-wrap}.mermaid{display:flex;justify-content:center}"
         "</style><script src=\"https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js\">"
         "</script><script>mermaid.initialize({startOnLoad:true, theme:'dark'});</script>"
-        "</head><body>" + content + "</body></html>"
+        "</head><body>" + toolbar + content
+        + '<script>const diagramCanvas=document.getElementById("diagram-canvas");'
+        "let diagramZoom=1;"
+        'document.querySelectorAll("[data-zoom]").forEach(button=>button.addEventListener("click",()=>{'
+        'if(!diagramCanvas)return;const action=button.dataset.zoom;'
+        'diagramZoom=action==="reset"?1:Math.max(0.25,Math.min(3,diagramZoom+(action==="in"?0.2:-0.2)));'
+        'diagramCanvas.style.transform=`scale(${diagramZoom})`;}));</script>'
+        "</body></html>"
     )
 
 
