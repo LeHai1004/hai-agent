@@ -44,5 +44,5 @@ Tự xây chatbot/agent riêng, dùng hằng ngày, không lo hết lượt.
 - SYSTEM_INSTRUCTION: câu kiến thức ổn định thì không gọi web_search.
 - Kiểm tra điểm: python test_route.py
 - /play nội dung: Gemini chia chủ đề thành 5-8 cảnh JSON (visual.py: build_scenes_prompt, parse_scenes, save_scenes_html, play), ghi workspace/vis_play.html từ template vis_player.html, mở bằng trình duyệt, có giọng đọc tiếng Việt.
-- /en, /git, /vis đã xong; chọn model theo điểm câu hỏi và bỏ qua model hết lượt ngày.
+- /en câu: dịch Việt-Anh hai chiều, model trả JSON (câu + từ vựng), ghi workspace/bilingual.html (hai cột Anh | Việt, bấm câu tiếng Anh để nghe đọc) và mở trong trình duyệt; vẫn in bản text ra terminal.
 - /pin nội dung, /pins, /unpin số: ghim tối đa 10 ghi chú quan trọng (pins.py, lưu history/pins.json), tự đưa vào system instruction ở mọi lần hỏi nên chat mới (/new) vẫn nhớ, không cần gửi lại lịch sử.
