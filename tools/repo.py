@@ -101,6 +101,8 @@ def draw_diagram(path: str = ".") -> str:
     canh = set()
     for f in files:
         rel = f.relative_to(goc).as_posix()
+        if rel in {"chat.py", "web.py"}:
+            continue
         kq = _phan_tich_py(f)
         if not kq:
             continue
@@ -148,6 +150,7 @@ def draw_diagram(path: str = ".") -> str:
         rel = f.relative_to(goc).as_posix()
         if rel not in grouped:
             dong.append(f'    {_id(rel)}["{rel}"]')
+    dong.extend(("    ui --> core", "    ui --> features", "    ui --> tools"))
     for a, b in sorted(canh):
         dong.append(f"    {_id(a)} --> {_id(b)}")
     code = "\n".join(dong)
