@@ -1,6 +1,7 @@
 import os
 import threading
 import webbrowser
+from pathlib import Path
 
 from pins import add_pin, format_pins, load_pins, remove_pin
 from dotenv import load_dotenv
@@ -8,15 +9,19 @@ from flask import Flask, jsonify, request, send_from_directory
 from google import genai
 from google.genai import types
 from openai import OpenAI
+from werkzeug.utils import secure_filename
 
 from history import load_history, save_history
 from llm import ask
+from pdfread import read_pdf_page
 from search import build_prompt, web_search
 from translate import translate
 from usage import format_usage, load_usage, record_usage
 
 load_dotenv()
 app = Flask(__name__)
+MAX_UPLOAD_SIZE = 30 * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_SIZE + 64 * 1024
 lock = threading.Lock()
 
 
@@ -82,7 +87,9 @@ textarea{flex:1;resize:none;height:56px;padding:12px;border-radius:10px;border:1
 <div id="log"></div>
 <footer>
 <div class="row"><textarea id="box" placeholder="Nhắn tin... (Enter gửi, Shift+Enter xuống dòng, /web câu hỏi để tìm web)"></textarea>
+<button type="button" class="ghost" id="attach" title="Chọn file PDF" aria-label="Chọn file PDF">📎</button>
 <button id="send">Gửi</button></div>
+<input type="file" id="pdf-file" accept=".pdf,application/pdf" hidden>
 <div class="hint" id="usage"></div>
 </footer>
 </section>
@@ -97,6 +104,8 @@ const box = document.getElementById("box");
 const sendBtn = document.getElementById("send");
 const panelFrame = document.getElementById("panel-frame");
 const panelTitle = document.getElementById("panel-title");
+const attachBtn = document.getElementById("attach");
+const pdfFileInput = document.getElementById("pdf-file");
 function openPanel(url, title){
   panelTitle.textContent = title;
   panelFrame.src = url + (url.includes("?") ? "&" : "?") + "t=" + Date.now();
@@ -110,9 +119,12 @@ log.addEventListener("click", event => {
   const link = event.target.closest("a");
   if (!link) return;
   const href = link.getAttribute("href");
-  if (!panelTitles[href]) return;
+  if (!href) return;
+  const pdfMatch = href.match(/^\\/pdfview\\/(\\d+)$/);
+  const title = panelTitles[href] || (pdfMatch ? `PDF trang ${pdfMatch[1]}` : "");
+  if (!title) return;
   event.preventDefault();
-  openPanel(href, panelTitles[href]);
+  openPanel(href, title);
 });
 function render(t){
   const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
@@ -121,6 +133,7 @@ function render(t){
     : p.replace(/`([^`]+)`/g,"<code>$1</code>")
        .replace(/\\*\\*([^*]+)\\*\\*/g,"<b>$1</b>")
        .replace(/(^|[\\s:])\\/bilingual\\b/g,'$1<a href="/bilingual">/bilingual</a>')
+       .replace(/(^|[\\s:])\\/pdfview\\/(\\d+)\\b/g,'$1<a href="/pdfview/$2">/pdfview/$2</a>')
        .replace(/(https?:\\/\\/[^\\s<"']+)/g,'<a href="$1" target="_blank" rel="noopener">$1</a>')
        .replace(/\\n/g,"<br>")).join("");
 }
@@ -148,6 +161,8 @@ async function send(){
     const reply = data.reply || data.error || "(không có phản hồi)";
     addMsg("bot", reply, data.model || "");
     if (reply.includes("/bilingual")) openPanel("/bilingual", "Dịch song ngữ");
+    const pdfMatch = reply.match(/\\/pdfview\\/(\\d+)\\b/);
+    if (pdfMatch) openPanel(`/pdfview/${pdfMatch[1]}`, `PDF trang ${pdfMatch[1]}`);
     if (data.usage) document.getElementById("usage").textContent = data.usage;
   } catch (e) {
     wait.remove();
@@ -156,6 +171,26 @@ async function send(){
   sendBtn.disabled = false;
   box.focus();
 }
+attachBtn.addEventListener("click", () => pdfFileInput.click());
+pdfFileInput.addEventListener("change", async () => {
+  const file = pdfFileInput.files[0];
+  if (!file) return;
+  const formData = new FormData();
+  formData.append("file", file);
+  attachBtn.disabled = true;
+  try {
+    const response = await fetch("/upload", {method:"POST", body:formData});
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "Không thể tải PDF lên");
+    box.value = `/read ${data.path} 1`;
+    box.focus();
+  } catch (e) {
+    addMsg("bot", "Lỗi tải PDF: " + e.message);
+  } finally {
+    pdfFileInput.value = "";
+    attachBtn.disabled = false;
+  }
+});
 sendBtn.addEventListener("click", send);
 box.addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey){ e.preventDefault(); send(); } });
 document.getElementById("new").addEventListener("click", () => { box.value = "/new"; send(); });
@@ -174,6 +209,29 @@ def index():
 @app.get("/bilingual")
 def bilingual():
     return send_from_directory("workspace", "bilingual.html")
+
+
+@app.get("/pdfview/<int:page_no>")
+def pdf_view(page_no):
+    return send_from_directory("workspace", f"pdf_trang{page_no}.html")
+
+
+@app.post("/upload")
+def upload():
+    uploaded = request.files.get("file")
+    if uploaded is None or not uploaded.filename:
+        return jsonify(error="Chọn một file PDF để tải lên."), 400
+    if os.path.splitext(uploaded.filename)[1].lower() != ".pdf":
+        return jsonify(error="Chỉ chấp nhận file .pdf."), 400
+    filename = secure_filename(uploaded.filename)
+    if not filename or os.path.splitext(filename)[1].lower() != ".pdf":
+        return jsonify(error="Tên file PDF không hợp lệ."), 400
+    content = uploaded.stream.read(MAX_UPLOAD_SIZE + 1)
+    if len(content) > MAX_UPLOAD_SIZE:
+        return jsonify(error="File PDF vượt quá giới hạn 30 MB."), 413
+    os.makedirs("workspace", exist_ok=True)
+    Path("workspace", filename).write_bytes(content)
+    return jsonify(path=f"workspace/{filename}")
 
 
 @app.get("/api/history")
@@ -214,6 +272,23 @@ def chat():
                 "(Đã mở workspace/bilingual.html)",
                 "Đã dịch xong. Mở bản song ngữ: /bilingual",
             )
+            return jsonify(reply=reply, model=model_key)
+        if text == "/read" or text.startswith("/read "):
+            args = text[5:].strip()
+            page_no = 1
+            head, _, tail = args.rpartition(" ")
+            if head and tail.isdigit():
+                args, page_no = head.strip(), int(tail)
+            args = args.strip('"')
+            if not args:
+                return jsonify(reply="Dùng: /read đường_dẫn.pdf [số trang]", model="")
+            try:
+                reply, model_key = read_pdf_page(
+                    gemini_client, openai_clients, args, page_no, open_browser=False)
+            except Exception as e:
+                return jsonify(reply=f"Lỗi đọc PDF: {e}", model="")
+            pdf_html_path = str(Path("workspace") / f"pdf_trang{page_no}.html")
+            reply = reply.replace(pdf_html_path, f"/pdfview/{page_no}")
             return jsonify(reply=reply, model=model_key)
         question, prompt, sources = text, text, []
         if text.startswith("/web "):

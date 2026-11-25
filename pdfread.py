@@ -121,7 +121,7 @@ DATA.forEach(p => {
 </script></div></body></html>"""
 
 
-def save_pdf_html(blocks, vi, page_no, total, name):
+def save_pdf_html(blocks, vi, page_no, total, name, open_browser=True):
     os.makedirs("workspace", exist_ok=True)
     pairs = [{"en": e, "vi": v} for e, v in zip(blocks, vi)]
     payload = json.dumps(pairs, ensure_ascii=False).replace("</", "<\\/")
@@ -129,11 +129,12 @@ def save_pdf_html(blocks, vi, page_no, total, name):
     html = PAGE.replace("__TITLE__", title).replace("__DATA__", payload)
     path = Path("workspace") / f"pdf_trang{page_no}.html"
     path.write_text(html, encoding="utf-8")
-    webbrowser.open(path.resolve().as_uri())
+    if open_browser:
+        webbrowser.open(path.resolve().as_uri())
     return str(path)
 
 
-def read_pdf_page(gemini_client, openai_clients, path, page_no):
+def read_pdf_page(gemini_client, openai_clients, path, page_no, open_browser=True):
     if not os.path.exists(path):
         return f"Không thấy file: {path}", ""
     blocks, total = page_blocks(path, page_no)
@@ -149,5 +150,6 @@ def read_pdf_page(gemini_client, openai_clients, path, page_no):
         if not any(v.startswith("(không dịch được") for v in vi):
             cache[key] = {"blocks": blocks, "vi": vi}
             save_cache(cache)
-    out = save_pdf_html(blocks, vi, page_no, total, os.path.basename(path))
+    out = save_pdf_html(
+        blocks, vi, page_no, total, os.path.basename(path), open_browser=open_browser)
     return f"Đã dịch trang {page_no}/{total} ({len(blocks)} đoạn), mở {out}. Xem trang khác: /read {path} {page_no + 1}", model_name
