@@ -16,6 +16,8 @@ from werkzeug.utils import secure_filename
 
 from history import load_history, save_history
 from llm import ask
+from filechat import ask_file
+from img import ask_image
 from pdfread import read_pdf_page
 from search import build_prompt, web_search
 from translate import translate
@@ -24,6 +26,11 @@ from usage import format_usage, load_usage, record_usage
 load_dotenv()
 app = Flask(__name__)
 MAX_UPLOAD_SIZE = 30 * 1024 * 1024
+ALLOWED_UPLOAD_EXTENSIONS = {
+    ".pdf", ".png", ".jpg", ".jpeg", ".webp", ".txt", ".md", ".py",
+    ".java", ".kt", ".cs", ".json", ".xml", ".html", ".css", ".js", ".sql",
+}
+IMAGE_UPLOAD_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_SIZE + 64 * 1024
 lock = threading.Lock()
 chat_jobs_lock = threading.Lock()
@@ -115,6 +122,7 @@ body.panel-open #panel{display:flex}
 #panel-frame{flex:1;width:100%;min-height:0;border:0;background:#fff}
 .msg{margin-bottom:16px;line-height:1.6;word-wrap:break-word}
 .user{background:#2a3a55;padding:10px 14px;border-radius:12px;margin-left:auto;width:fit-content;max-width:80%;white-space:pre-wrap}
+.user .thumbnail{display:block;max-width:180px;max-height:120px;object-fit:contain;margin-top:8px;border-radius:6px}
 .bot{padding:4px 2px}
 .meta{color:#8b8f99;font-size:.78rem;margin-top:4px}
 .confirmation{padding:12px;background:#24262b;border:1px solid #4b5060;border-radius:10px;white-space:pre-wrap}
@@ -135,9 +143,9 @@ textarea{flex:1;resize:none;height:56px;padding:12px;border-radius:10px;border:1
 <div id="log"></div>
 <footer>
 <div class="row"><textarea id="box" placeholder="Nhắn tin... (Enter gửi, Shift+Enter xuống dòng, /web câu hỏi để tìm web)"></textarea>
-<button type="button" class="ghost" id="attach" title="Chọn file PDF" aria-label="Chọn file PDF">📎</button>
+<button type="button" class="ghost" id="attach" title="Chọn file" aria-label="Chọn file">📎</button>
 <button id="send">Gửi</button></div>
-<input type="file" id="pdf-file" accept=".pdf,application/pdf" hidden>
+<input type="file" id="pdf-file" accept=".pdf,.png,.jpg,.jpeg,.webp,.txt,.md,.py,.java,.kt,.cs,.json,.xml,.html,.css,.js,.sql" hidden>
 <div class="hint" id="usage"></div>
 </footer>
 </section>
@@ -154,6 +162,7 @@ const panelFrame = document.getElementById("panel-frame");
 const panelTitle = document.getElementById("panel-title");
 const attachBtn = document.getElementById("attach");
 const pdfFileInput = document.getElementById("pdf-file");
+let pendingImagePreview = null;
 function openPanel(url, title){
   panelTitle.textContent = title;
   panelFrame.src = url + (url.includes("?") ? "&" : "?") + "t=" + Date.now();
@@ -185,10 +194,19 @@ function render(t){
        .replace(/(https?:\\/\\/[^\\s<"']+)/g,'<a href="$1" target="_blank" rel="noopener">$1</a>')
        .replace(/\\n/g,"<br>")).join("");
 }
-function addMsg(role, text, meta){
+function addMsg(role, text, meta, imageUrl){
   const d = document.createElement("div");
   d.className = "msg " + (role === "user" ? "user" : "bot");
-  if (role === "user") d.textContent = text; else d.innerHTML = render(text);
+  if (role === "user") {
+    d.textContent = text;
+    if (imageUrl) {
+      const img = document.createElement("img");
+      img.className = "thumbnail";
+      img.alt = "Ảnh đã tải lên";
+      img.src = imageUrl;
+      d.appendChild(img);
+    }
+  } else d.innerHTML = render(text);
   if (meta){ const m = document.createElement("div"); m.className = "meta"; m.textContent = meta; d.appendChild(m); }
   log.appendChild(d);
   log.scrollTop = log.scrollHeight;
@@ -262,7 +280,9 @@ async function send(){
   const text = box.value.trim();
   if (!text) return;
   box.value = "";
-  addMsg("user", text);
+  const imagePreview = pendingImagePreview;
+  pendingImagePreview = null;
+  addMsg("user", text, "", imagePreview);
   const wait = addMsg("bot", "Đang trả lời...");
   sendBtn.disabled = true;
   try {
@@ -296,8 +316,14 @@ pdfFileInput.addEventListener("change", async () => {
     const response = await fetch("/upload", {method:"POST", body:formData});
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.error || "Không thể tải PDF lên");
-    box.value = `/read ${data.path} 1`;
+    pendingImagePreview = data.kind === "image"
+      ? "/workspace-img/" + encodeURIComponent(data.path.split("/").pop())
+      : null;
+    if (data.kind === "pdf") box.value = `/read ${data.path} 1`;
+    else if (data.kind === "image") box.value = `/img ${data.path} `;
+    else box.value = `/file ${data.path} `;
     box.focus();
+    box.setSelectionRange(box.value.length, box.value.length);
   } catch (e) {
     addMsg("bot", "Lỗi tải PDF: " + e.message);
   } finally {
@@ -334,18 +360,36 @@ def pdf_view(page_no):
 def upload():
     uploaded = request.files.get("file")
     if uploaded is None or not uploaded.filename:
-        return jsonify(error="Chọn một file PDF để tải lên."), 400
-    if os.path.splitext(uploaded.filename)[1].lower() != ".pdf":
-        return jsonify(error="Chỉ chấp nhận file .pdf."), 400
+        return jsonify(error="Chọn một file để tải lên."), 400
+    original_name = uploaded.filename.replace("\\", "/").rsplit("/", 1)[-1]
+    lowered_name = original_name.lower()
+    if lowered_name == ".env" or lowered_name.startswith(".env.") or any(
+        blocked in lowered_name for blocked in ("secret", "key")
+    ):
+        return jsonify(error="Không chấp nhận file .env hoặc tên có secret/key."), 400
+    extension = os.path.splitext(original_name)[1].lower()
+    if extension not in ALLOWED_UPLOAD_EXTENSIONS:
+        return jsonify(error="Loại file không được hỗ trợ."), 400
     filename = secure_filename(uploaded.filename)
-    if not filename or os.path.splitext(filename)[1].lower() != ".pdf":
-        return jsonify(error="Tên file PDF không hợp lệ."), 400
+    if not filename or os.path.splitext(filename)[1].lower() != extension:
+        return jsonify(error="Tên file không hợp lệ."), 400
     content = uploaded.stream.read(MAX_UPLOAD_SIZE + 1)
     if len(content) > MAX_UPLOAD_SIZE:
-        return jsonify(error="File PDF vượt quá giới hạn 30 MB."), 413
+        return jsonify(error="File vượt quá giới hạn 30 MB."), 413
     os.makedirs("workspace", exist_ok=True)
     Path("workspace", filename).write_bytes(content)
-    return jsonify(path=f"workspace/{filename}")
+    kind = "pdf" if extension == ".pdf" else (
+        "image" if extension in IMAGE_UPLOAD_EXTENSIONS else "text")
+    return jsonify(path=f"workspace/{filename}", kind=kind)
+
+
+@app.get("/workspace-img/<path:filename>")
+def workspace_image(filename):
+    if ".." in filename or "/" in filename or "\\" in filename:
+        return "", 404
+    if os.path.splitext(filename)[1].lower() not in IMAGE_UPLOAD_EXTENSIONS:
+        return "", 404
+    return send_from_directory("workspace", filename)
 
 
 @app.get("/api/history")
@@ -399,6 +443,50 @@ def _process_chat_message(text):
         pdf_html_path = str(Path("workspace") / f"pdf_trang{page_no}.html")
         reply = reply.replace(pdf_html_path, f"/pdfview/{page_no}")
         return {"reply": reply, "model": model_key}
+    if text == "/img" or text.startswith("/img "):
+        rest = text[4:].strip()
+        if rest.startswith('"') and '"' in rest[1:]:
+            path, _, question = rest[1:].partition('"')
+        else:
+            path, _, question = rest.partition(" ")
+        path, question = path.strip(), question.strip()
+        if not path:
+            return {"reply": "Dùng: /img đường_dẫn_ảnh câu hỏi", "model": ""}
+        try:
+            reply, model_key, meta = ask_image(
+                gemini_client, openai_clients, path, question)
+        except Exception as e:
+            return {"reply": f"Lỗi đọc ảnh: {e}", "model": ""}
+        if not model_key:
+            return {"reply": reply, "model": ""}
+        record_usage(usage, model_key, meta)
+        return {
+            "reply": reply,
+            "model": model_key,
+            "usage": format_usage(usage, model_key),
+        }
+    if text == "/file" or text.startswith("/file "):
+        rest = text[5:].strip()
+        if rest.startswith('"') and '"' in rest[1:]:
+            path, _, question = rest[1:].partition('"')
+        else:
+            path, _, question = rest.partition(" ")
+        path, question = path.strip(), question.strip()
+        if not path:
+            return {"reply": "Dùng: /file đường_dẫn câu hỏi", "model": ""}
+        try:
+            reply, model_key, meta, note = ask_file(
+                gemini_client, openai_clients, path, question)
+        except Exception as e:
+            return {"reply": f"Lỗi đọc file: {e}", "model": ""}
+        if not model_key:
+            return {"reply": reply, "model": ""}
+        record_usage(usage, model_key, meta)
+        return {
+            "reply": f"{reply}\n{note}",
+            "model": model_key,
+            "usage": format_usage(usage, model_key),
+        }
 
     question, prompt, sources = text, text, []
     if text.startswith("/web "):
