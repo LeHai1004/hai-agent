@@ -22,7 +22,7 @@ from pdfread import read_pdf_page
 from search import build_prompt, web_search
 from translate import translate
 from usage import format_usage, load_usage, record_usage
-from visual import play, visualize
+from visual import parse_scenes, play, visualize
 
 load_dotenv()
 app = Flask(__name__)
@@ -445,12 +445,18 @@ def _process_chat_message(text):
         if not play_content:
             return {"reply": "Dùng: /play chủ đề cần giải thích", "model": ""}
         try:
-            reply, model_key, _ = play(
+            raw_reply, model_key, _ = play(
                 gemini_client, openai_clients, play_content, open_browser=False)
         except Exception as e:
             return {"reply": f"Lỗi tạo video: {e}", "model": ""}
+        scenes = parse_scenes(raw_reply)
+        if scenes:
+            title = " ".join(scenes[0]["title"].split())[:80]
+            reply = f"{title} — {len(scenes)} cảnh.\nMở hoạt hình: /vis-play"
+        else:
+            reply = "Giải thích động.\nMở hoạt hình: /vis-play"
         return {
-            "reply": f"{reply}\n\nMở hoạt hình: /vis-play",
+            "reply": reply,
             "model": model_key,
         }
     if text == "/vis" or text.startswith("/vis "):
@@ -458,12 +464,12 @@ def _process_chat_message(text):
         if not vis_content:
             return {"reply": "Dùng: /vis câu hỏi hoặc đoạn code", "model": ""}
         try:
-            reply, model_key, _ = visualize(
+            _, model_key, _ = visualize(
                 gemini_client, openai_clients, vis_content, open_browser=False)
         except Exception as e:
             return {"reply": f"Lỗi trực quan hóa: {e}", "model": ""}
         return {
-            "reply": f"{reply}\n\nMở sơ đồ: /vis-view",
+            "reply": "Sơ đồ giải thích đã sẵn sàng.\nMở sơ đồ: /vis-view",
             "model": model_key,
         }
     if text == "/read" or text.startswith("/read "):
