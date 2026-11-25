@@ -1,0 +1,189 @@
+import os
+import threading
+import webbrowser
+
+from pins import add_pin, format_pins, load_pins, remove_pin
+from dotenv import load_dotenv
+from flask import Flask, jsonify, request
+from google import genai
+from google.genai import types
+from openai import OpenAI
+
+from history import load_history, save_history
+from llm import ask
+from search import build_prompt, web_search
+from usage import format_usage, load_usage, record_usage
+
+load_dotenv()
+app = Flask(__name__)
+lock = threading.Lock()
+
+
+def make_clients():
+    gemini_client = None
+    if os.environ.get("GEMINI_API_KEY"):
+        gemini_client = genai.Client(
+            api_key=os.environ["GEMINI_API_KEY"],
+            http_options=types.HttpOptions(api_version="v1beta"),
+        )
+    openai_clients = {}
+    if os.environ.get("GROQ_API_KEY"):
+        openai_clients["groq"] = OpenAI(
+            api_key=os.environ["GROQ_API_KEY"], base_url="https://api.groq.com/openai/v1")
+    if os.environ.get("OPENROUTER_API_KEY"):
+        openai_clients["openrouter"] = OpenAI(
+            api_key=os.environ["OPENROUTER_API_KEY"], base_url="https://openrouter.ai/api/v1")
+    return gemini_client, openai_clients
+
+
+gemini_client, openai_clients = make_clients()
+messages = load_history()
+usage = load_usage()
+
+PAGE = """<!DOCTYPE html>
+<html lang="vi"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hai Agent</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;height:100vh;display:flex;flex-direction:column;background:#1b1c1f;color:#e8e8ea;font-family:system-ui,sans-serif}
+header{display:flex;justify-content:space-between;align-items:center;padding:12px 20px;border-bottom:1px solid #2e3036}
+header b{font-size:1.05rem}
+button{border:0;border-radius:8px;padding:9px 16px;background:#3b82f6;color:#fff;cursor:pointer;font-size:.95rem}
+button:disabled{background:#4b5060;cursor:not-allowed}
+.ghost{background:#2e3036}
+#log{flex:1;overflow-y:auto;padding:20px;max-width:860px;width:100%;margin:0 auto}
+.msg{margin-bottom:16px;line-height:1.6;word-wrap:break-word}
+.user{background:#2a3a55;padding:10px 14px;border-radius:12px;margin-left:auto;width:fit-content;max-width:80%;white-space:pre-wrap}
+.bot{padding:4px 2px}
+.meta{color:#8b8f99;font-size:.78rem;margin-top:4px}
+pre{background:#111214;padding:12px;border-radius:8px;overflow-x:auto}
+code{background:#111214;padding:1px 5px;border-radius:4px;font-family:Consolas,monospace}
+pre code{padding:0}
+a{color:#7cb2ff}
+footer{border-top:1px solid #2e3036;padding:14px 20px}
+.row{display:flex;gap:10px;max-width:860px;margin:0 auto}
+textarea{flex:1;resize:none;height:56px;padding:12px;border-radius:10px;border:1px solid #3a3d45;background:#24262b;color:#e8e8ea;font-size:1rem;font-family:inherit}
+.hint{max-width:860px;margin:6px auto 0;color:#8b8f99;font-size:.78rem}
+</style></head><body>
+<header><b>Hai Agent</b><button class="ghost" id="new">Chat mới</button></header>
+<div id="log"></div>
+<footer>
+<div class="row"><textarea id="box" placeholder="Nhắn tin... (Enter gửi, Shift+Enter xuống dòng, /web câu hỏi để tìm web)"></textarea>
+<button id="send">Gửi</button></div>
+<div class="hint" id="usage"></div>
+</footer>
+<script>
+const log = document.getElementById("log");
+const box = document.getElementById("box");
+const sendBtn = document.getElementById("send");
+function render(t){
+  const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  return esc(t).split("```").map((p,i) => i % 2
+    ? "<pre><code>" + p.replace(/^[a-zA-Z0-9]*\\n/,"") + "</code></pre>"
+    : p.replace(/`([^`]+)`/g,"<code>$1</code>")
+       .replace(/\\*\\*([^*]+)\\*\\*/g,"<b>$1</b>")
+       .replace(/(https?:\\/\\/[^\\s<"']+)/g,'<a href="$1" target="_blank" rel="noopener">$1</a>')
+       .replace(/\\n/g,"<br>")).join("");
+}
+function addMsg(role, text, meta){
+  const d = document.createElement("div");
+  d.className = "msg " + (role === "user" ? "user" : "bot");
+  if (role === "user") d.textContent = text; else d.innerHTML = render(text);
+  if (meta){ const m = document.createElement("div"); m.className = "meta"; m.textContent = meta; d.appendChild(m); }
+  log.appendChild(d);
+  log.scrollTop = log.scrollHeight;
+  return d;
+}
+async function send(){
+  const text = box.value.trim();
+  if (!text) return;
+  box.value = "";
+  addMsg("user", text);
+  const wait = addMsg("bot", "Đang trả lời...");
+  sendBtn.disabled = true;
+  try {
+    const r = await fetch("/api/chat", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({text})});
+    const data = await r.json();
+    wait.remove();
+    if (data.new) log.innerHTML = "";
+    addMsg("bot", data.reply || data.error || "(không có phản hồi)", data.model || "");
+    if (data.usage) document.getElementById("usage").textContent = data.usage;
+  } catch (e) {
+    wait.remove();
+    addMsg("bot", "Lỗi kết nối tới server: " + e);
+  }
+  sendBtn.disabled = false;
+  box.focus();
+}
+sendBtn.addEventListener("click", send);
+box.addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey){ e.preventDefault(); send(); } });
+document.getElementById("new").addEventListener("click", () => { box.value = "/new"; send(); });
+fetch("/api/history").then(r => r.json()).then(list => {
+  list.forEach(m => addMsg(m.role === "user" ? "user" : "bot", m.text));
+});
+box.focus();
+</script></body></html>"""
+
+
+@app.get("/")
+def index():
+    return PAGE
+
+
+@app.get("/api/history")
+def history():
+    return jsonify(messages)
+
+
+@app.post("/api/chat")
+def chat():
+    global messages
+    text = (request.get_json(silent=True) or {}).get("text", "").strip()
+    if not text:
+        return jsonify(error="Tin nhắn trống"), 400
+    with lock:
+        if text == "/new":
+            messages = []
+            save_history(messages)
+            return jsonify(reply="Đã bắt đầu cuộc chat mới.", model="", new=True)
+        if text == "/pins" or text.startswith("/pin ") or text.startswith("/unpin"):
+            pins = load_pins()
+            if text == "/pins":
+                reply = format_pins(pins)
+            elif text.startswith("/unpin"):
+                reply = remove_pin(pins, text[6:].strip())
+            else:
+                reply = add_pin(pins, text[5:])
+            return jsonify(reply=reply, model="")
+        question, prompt, sources = text, text, []
+        if text.startswith("/web "):
+            question = text[5:].strip()
+            try:
+                results = web_search(question)
+            except Exception as e:
+                return jsonify(reply=f"Lỗi tìm web: {e}", model="")
+            if not results:
+                return jsonify(reply="Không tìm thấy kết quả nào.", model="")
+            prompt = build_prompt(question, results)
+            sources = [(r.get("title", ""), r.get("href", "")) for r in results]
+        try:
+            answer, model_key, meta = ask(
+                gemini_client, openai_clients, messages, prompt, use_history=not sources)
+        except Exception as e:
+            return jsonify(reply=f"Lỗi: tất cả model đều thất bại. {e}", model="")
+        saved = answer
+        if sources:
+            saved += "\n\nNguồn:\n" + "\n".join(
+                f"[{i}] {t}: {u}" for i, (t, u) in enumerate(sources, 1))
+        messages.append({"role": "user", "text": question})
+        messages.append({"role": "model", "text": saved})
+        save_history(messages)
+        record_usage(usage, model_key, meta)
+        return jsonify(reply=saved, model=model_key, usage=format_usage(usage, model_key))
+
+
+if __name__ == "__main__":
+    url = "http://127.0.0.1:5000"
+    threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+    app.run(host="127.0.0.1", port=5000)
