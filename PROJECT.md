@@ -43,3 +43,5 @@ Tự xây chatbot/agent riêng, dùng hằng ngày, không lo hết lượt.
 - available_models bỏ qua model đã dùng hết LIMITS trong ngày (đọc history/usage.json); nếu tất cả đều hết thì vẫn thử lại theo thứ tự cũ.
 - SYSTEM_INSTRUCTION: câu kiến thức ổn định thì không gọi web_search.
 - Kiểm tra điểm: python test_route.py
+- /play nội dung: Gemini chia chủ đề thành 5-8 cảnh JSON (visual.py: build_scenes_prompt, parse_scenes, save_scenes_html, play), ghi workspace/vis_play.html từ template vis_player.html, mở bằng trình duyệt, có giọng đọc tiếng Việt.
+- /en, /git, /vis đã xong; chọn model theo điểm câu hỏi và bỏ qua model hết lượt ngày.
