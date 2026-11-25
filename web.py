@@ -152,10 +152,14 @@ button:disabled{background:#4b5060;cursor:not-allowed}
 .ghost{background:#2e3036}
 #log{flex:1;overflow-y:auto;padding:20px;max-width:860px;width:100%;margin:0 auto}
 #layout{display:flex;flex:1;min-height:0;width:100%}
-#chat{display:flex;flex:1 1 100%;flex-direction:column;min-width:0}
-body.panel-open #chat{flex:0 0 45%}
-#panel{display:none;flex:0 0 55%;flex-direction:column;min-width:0;min-height:0;border-left:1px solid #2e3036;background:#202125}
+#chat{display:flex;flex:1 1 auto;flex-direction:column;min-width:0}
+#splitter{display:none;flex:0 0 6px;cursor:col-resize;background:#2e3036;z-index:2;touch-action:none;transition:background .12s,box-shadow .12s}
+body.panel-open #splitter{display:block}
+#splitter:hover,body.panel-resizing #splitter{background:#3b82f6;box-shadow:0 0 8px #3b82f6}
+#panel{display:none;flex:0 0 55%;flex-direction:column;min-width:300px;max-width:70vw;min-height:0;border-left:1px solid #2e3036;background:#202125}
 body.panel-open #panel{display:flex}
+body.panel-resizing,body.panel-resizing *{cursor:col-resize!important;user-select:none!important}
+body.panel-resizing #panel-frame{pointer-events:none}
 .panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 12px;border-bottom:1px solid #2e3036}
 .panel-head b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #close-panel{font-size:1.1rem;padding:7px 12px}
@@ -200,6 +204,7 @@ textarea{flex:1;resize:none;height:56px;padding:12px;border-radius:10px;border:1
 <div class="hint" id="usage"></div>
 </footer>
 </section>
+<div id="splitter" role="separator" aria-orientation="vertical" aria-label="Thay đổi độ rộng khung bên"></div>
 <aside id="panel">
 <div class="panel-head"><b id="panel-title"></b><button class="ghost" id="close-panel" aria-label="Đóng panel">✕</button></div>
 <iframe id="panel-frame" title="Nội dung" allow="autoplay; speech-synthesis"></iframe>
@@ -209,11 +214,47 @@ textarea{flex:1;resize:none;height:56px;padding:12px;border-radius:10px;border:1
 const log = document.getElementById("log");
 const box = document.getElementById("box");
 const sendBtn = document.getElementById("send");
+const panel = document.getElementById("panel");
 const panelFrame = document.getElementById("panel-frame");
 const panelTitle = document.getElementById("panel-title");
+const splitter = document.getElementById("splitter");
 const attachBtn = document.getElementById("attach");
 const pdfFileInput = document.getElementById("pdf-file");
 let pendingImagePreview = null;
+const panelWidthKey = "hai-agent-panel-width";
+function setPanelWidth(width){
+  const maxWidth = Math.max(300, window.innerWidth * 0.7);
+  const boundedWidth = Math.max(300, Math.min(maxWidth, width));
+  panel.style.flexBasis = boundedWidth + "px";
+}
+const savedPanelWidth = Number(localStorage.getItem(panelWidthKey));
+if (Number.isFinite(savedPanelWidth) && savedPanelWidth > 0) {
+  setPanelWidth(savedPanelWidth);
+}
+let resizingPanel = false;
+splitter.addEventListener("mousedown", event => {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  resizingPanel = true;
+  document.body.classList.add("panel-resizing");
+});
+document.addEventListener("mousemove", event => {
+  if (resizingPanel) setPanelWidth(window.innerWidth - event.clientX);
+});
+document.addEventListener("mouseup", () => {
+  if (!resizingPanel) return;
+  resizingPanel = false;
+  document.body.classList.remove("panel-resizing");
+  localStorage.setItem(panelWidthKey, parseFloat(panel.style.flexBasis));
+});
+splitter.addEventListener("dblclick", () => {
+  panel.style.flexBasis = "55%";
+  localStorage.removeItem(panelWidthKey);
+});
+window.addEventListener("resize", () => {
+  const currentBasis = panel.style.flexBasis;
+  if (currentBasis.endsWith("px")) setPanelWidth(parseFloat(currentBasis));
+});
 function openPanel(url, title){
   panelTitle.textContent = title;
   panelFrame.src = /[?&]t=/.test(url) ? url : url + (url.includes("?") ? "&" : "?") + "t=" + Date.now();
