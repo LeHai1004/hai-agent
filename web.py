@@ -1,3 +1,4 @@
+import html
 import os
 import re
 import threading
@@ -215,13 +216,13 @@ const pdfFileInput = document.getElementById("pdf-file");
 let pendingImagePreview = null;
 function openPanel(url, title){
   panelTitle.textContent = title;
-  panelFrame.src = url + (url.includes("?") ? "&" : "?") + "t=" + Date.now();
+  panelFrame.src = /[?&]t=/.test(url) ? url : url + (url.includes("?") ? "&" : "?") + "t=" + Date.now();
   document.body.classList.add("panel-open");
 }
 document.getElementById("close-panel").addEventListener("click", () => {
   document.body.classList.remove("panel-open");
 });
-const panelTitles = {"/bilingual":"Dịch song ngữ","/read":"Đọc tài liệu","/vis":"Trực quan hóa","/vis-play":"Giải thích động","/vis-view":"Sơ đồ giải thích"};
+const panelTitles = {"/bilingual":"Dịch song ngữ","/read":"Đọc tài liệu","/vis":"Trực quan hóa","/vis-play":"Giải thích động","/vis-view":"Sơ đồ giải thích","/diagram":"Sơ đồ"};
 log.addEventListener("click", event => {
   const link = event.target.closest("a");
   if (!link) return;
@@ -239,6 +240,7 @@ function render(t){
     .replace(/`([^`]+)`/g,"<code>$1</code>")
     .replace(/\\*\\*([^*]+)\\*\\*/g,"<b>$1</b>")
     .replace(/(^|[\\s:])\\/bilingual\\b/g,'$1<a href="/bilingual">/bilingual</a>')
+    .replace(/(^|[\\s:])\\/diagram\\b/g,'$1<a href="/diagram">/diagram</a>')
     .replace(/(^|[\\s:])\\/pdfview\\/(\\d+)\\b/g,'$1<a href="/pdfview/$2">/pdfview/$2</a>')
     .replace(/(^|[\\s:])\\/(vis-play|vis-view)\\b/g,'$1<a href="/$2">/$2</a>')
     .replace(/(^|[\\s:])\\/download\\/([^\\s<"']+)/g,'$1<a href="/download/$2">/download/$2</a>')
@@ -451,6 +453,7 @@ async function send(){
     if (pdfMatch) openPanel(`/pdfview/${pdfMatch[1]}`, `PDF trang ${pdfMatch[1]}`);
     if (reply.includes("/vis-play")) openPanel("/vis-play", "Giải thích động");
     if (reply.includes("/vis-view")) openPanel("/vis-view", "Sơ đồ giải thích");
+    if (reply.includes("Mở sơ đồ: /diagram")) openPanel(`/diagram?t=${Date.now()}`, "Sơ đồ");
     if (data.usage) document.getElementById("usage").textContent = data.usage;
   } catch (e) {
     wait.remove();
@@ -519,6 +522,30 @@ def vis_play():
 @app.get("/vis-view")
 def vis_view():
     return send_from_directory("workspace", "vis.html")
+
+
+@app.get("/diagram")
+def diagram():
+    diagram_path = Path("workspace", "diagram.md")
+    diagram_text = ""
+    if diagram_path.is_file() and not diagram_path.is_symlink():
+        diagram_text = diagram_path.read_text(encoding="utf-8")
+    match = re.search(r"```mermaid\s*\n(.*?)```", diagram_text, re.DOTALL)
+    if match is None:
+        content = "<p>Chưa có sơ đồ</p>"
+    else:
+        content = '<pre class="mermaid">' + html.escape(match.group(1)) + "</pre>"
+    return (
+        "<!DOCTYPE html><html lang=\"vi\"><head><meta charset=\"UTF-8\">"
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        "<title>Sơ đồ</title><style>"
+        "body{margin:0;padding:24px;background:#1b1c1f;color:#e8e8ea;"
+        "font-family:system-ui,sans-serif}pre{white-space:pre-wrap}"
+        ".mermaid{display:flex;justify-content:center}"
+        "</style><script src=\"https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js\">"
+        "</script><script>mermaid.initialize({startOnLoad:true, theme:'dark'});</script>"
+        "</head><body>" + content + "</body></html>"
+    )
 
 
 @app.get("/download/<path:filename>")
@@ -801,6 +828,12 @@ def _run_chat_job(job_id, text):
                     f"📄 File đã tạo: {filename} — tải về: /files/{quote(filename, safe='')}"
                     for filename in created_files
                 )
+            if (
+                "diagram.md" in workspace_after
+                and workspace_before.get("diagram.md") != workspace_after["diagram.md"]
+                and isinstance(result.get("reply"), str)
+            ):
+                result["reply"] += "\n\nMở sơ đồ: /diagram"
     except Exception as e:
         result = {"reply": f"Lỗi xử lý: {e}", "model": ""}
     finally:
