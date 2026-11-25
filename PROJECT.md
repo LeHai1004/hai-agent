@@ -49,3 +49,4 @@ Tự xây chatbot/agent riêng, dùng hằng ngày, không lo hết lượt.
 - /read file.pdf [số trang]: đọc PDF bằng pymupdf theo từng khối đoạn, dịch một trang mỗi lần, ghi workspace/pdf_trangN.html hai cột Anh | Việt (bấm đoạn Anh để nghe đọc).
   /read: Bản dịch từng trang được cache ở history/pdf_cache.json, mở lại không tốn lượt.
 - /img đường*dẫn*ảnh câu hỏi: gửi ảnh (png, jpg, webp, tối đa 4 MB) cho Gemini hỏi đáp, ảnh không lưu vào lịch sử chat; chỉ chọn model Gemini vì Groq/OpenRouter chưa đọc ảnh.
+- /file đường_dẫn câu hỏi: hỏi bot về file chữ hoặc PDF (cắt 24000 ký tự đầu), chặn .env/khóa bí mật, không lưu lịch sử.

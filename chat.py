@@ -15,6 +15,7 @@ from llm import ask
 from pins import load_pins, add_pin, remove_pin, format_pins
 from pdfread import read_pdf_page
 from img import ask_image
+from filechat import ask_file
 
 load_dotenv()
 
@@ -59,7 +60,7 @@ def main():
     da_bao = False
 
     print(f"Chatbot. Đã nạp {len(messages)} tin nhắn cũ.")
-    print("Lệnh: '/new' chat mới, '/usage' xem lượt dùng, '/web câu hỏi' tìm web, '/en câu' dịch Việt-Anh, '/git owner/repo' Git Coach, '/vis nội dung' trực quan hóa, '/play nội dung' video giải thích, '/pin nội dung' ghim ghi chú, '/pins' xem ghim, '/unpin số' bỏ ghim, 'exit' thoát.\n")
+    print("Lệnh: /new chat mới | /usage lượt dùng | /web câu hỏi | /en câu dịch | /git owner/repo | /vis nội dung | /play nội dung | /read file.pdf [trang] | /img ảnh câu hỏi | /file đường_dẫn câu hỏi | /pin, /pins, /unpin | /export, /import | exit\n")
     while True:
         text = input("Bạn: ").strip()
         if not text:
@@ -199,6 +200,28 @@ def main():
                 continue
             record_usage(usage, model_name, meta)
             print(f"\nBot ({model_name}): {reply}\n")
+            continue
+
+        if text.startswith("/file "):
+            rest = text[6:].strip()
+            if rest.startswith('"') and '"' in rest[1:]:
+                path, _, question = rest[1:].partition('"')
+            else:
+                path, _, question = rest.partition(" ")
+            path, question = path.strip(), question.strip()
+            if not path:
+                print("Dùng: /file đường_dẫn câu hỏi (ví dụ: /file chat.py giải thích hàm main)\n")
+                continue
+            try:
+                reply, model_name, meta, note = ask_file(gemini_client, openai_clients, path, question)
+            except Exception as e:
+                print(f"Lỗi đọc file: {e}\n")
+                continue
+            if not model_name:
+                print(reply + "\n")
+                continue
+            record_usage(usage, model_name, meta)
+            print(f"\nBot ({model_name}): {reply}\n{note}\n")
             continue
 
         if text.startswith("/web "):
