@@ -156,14 +156,17 @@ def available_models(text):
         ok.append((provider, model))
     return ok or ordered
 
-def ask(gemini_client, openai_clients, messages, text, use_history=True, route_text=None):
+def ask(gemini_client, openai_clients, messages, text, use_history=True, route_text=None, image=None):
     last_error = None
     pins_context = pins_as_context(load_pins())
     system_instruction = SYSTEM_INSTRUCTION
     if pins_context:
         system_instruction += "\n\n" + pins_context
 
-    for provider, model in available_models(route_text or text):
+    models = available_models(route_text or text)
+    if image:
+        models = [m for m in models if m[0] == "gemini"]
+    for provider, model in models:
         try:
             if provider == "gemini":
                 history = to_contents(messages) if use_history else []
@@ -172,7 +175,8 @@ def ask(gemini_client, openai_clients, messages, text, use_history=True, route_t
                     system_instruction=system_instruction,
                 )
                 chat = gemini_client.chats.create(model=model, history=history, config=config)
-                reply = chat.send_message(text)
+                message = text if not image else [types.Part.from_bytes(data=image[0], mime_type=image[1]), text]
+                reply = chat.send_message(message)
                 meta = getattr(reply, "usage_metadata", None)
                 return reply.text, f"{provider}/{model}", meta
 

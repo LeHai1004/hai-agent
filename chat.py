@@ -14,6 +14,7 @@ from search import build_prompt, web_search
 from llm import ask
 from pins import load_pins, add_pin, remove_pin, format_pins
 from pdfread import read_pdf_page
+from img import ask_image
 
 load_dotenv()
 
@@ -176,6 +177,28 @@ def main():
                 print(f"Lỗi đọc PDF: {e}\n")
                 continue
             print(f"\n{msg}\n[{model_name}]\n")
+            continue
+
+        if text.startswith("/img "):
+            rest = text[5:].strip()
+            if rest.startswith('"') and '"' in rest[1:]:
+                path, _, question = rest[1:].partition('"')
+            else:
+                path, _, question = rest.partition(" ")
+            path, question = path.strip(), question.strip()
+            if not path:
+                print("Dùng: /img đường_dẫn_ảnh câu hỏi (ví dụ: /img workspace/loi.png giải thích lỗi này)\n")
+                continue
+            try:
+                reply, model_name, meta = ask_image(gemini_client, openai_clients, path, question)
+            except Exception as e:
+                print(f"Lỗi đọc ảnh: {e}\n")
+                continue
+            if not model_name:
+                print(reply + "\n")
+                continue
+            record_usage(usage, model_name, meta)
+            print(f"\nBot ({model_name}): {reply}\n")
             continue
 
         if text.startswith("/web "):

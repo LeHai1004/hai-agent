@@ -48,3 +48,4 @@ Tự xây chatbot/agent riêng, dùng hằng ngày, không lo hết lượt.
 - /pin nội dung, /pins, /unpin số: ghim tối đa 10 ghi chú quan trọng (pins.py, lưu history/pins.json), tự đưa vào system instruction ở mọi lần hỏi nên chat mới (/new) vẫn nhớ, không cần gửi lại lịch sử.
 - /read file.pdf [số trang]: đọc PDF bằng pymupdf theo từng khối đoạn, dịch một trang mỗi lần, ghi workspace/pdf_trangN.html hai cột Anh | Việt (bấm đoạn Anh để nghe đọc).
   /read: Bản dịch từng trang được cache ở history/pdf_cache.json, mở lại không tốn lượt.
+- /img đường*dẫn*ảnh câu hỏi: gửi ảnh (png, jpg, webp, tối đa 4 MB) cho Gemini hỏi đáp, ảnh không lưu vào lịch sử chat; chỉ chọn model Gemini vì Groq/OpenRouter chưa đọc ảnh.

@@ -6,3 +6,5 @@ workspace/
 exports/
 workspace/*.pdf
 workspace/pdf_trang*.html
+workspace/*.png
+workspace/*.jpg
