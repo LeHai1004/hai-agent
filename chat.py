@@ -5,7 +5,7 @@ from google.genai import types
 from openai import OpenAI
 from transfer import export_chat, import_chat, list_exports
 from gitcoach import git_coach
-from visual import visualize
+from visual import visualize, play
 from translate import translate
 from config import MODELS
 from history import load_history, save_history
@@ -55,7 +55,7 @@ def main():
     da_bao = False
 
     print(f"Chatbot. Đã nạp {len(messages)} tin nhắn cũ.")
-    print("Lệnh: '/new' chat mới, '/usage' xem lượt dùng, '/web câu hỏi' tìm web, '/en câu' dịch Việt-Anh, '/git owner/repo' Git Coach, '/vis nội dung' trực quan hóa, 'exit' thoát.\n")
+    print("Lệnh: '/new' chat mới, '/usage' xem lượt dùng, '/web câu hỏi' tìm web, '/en câu' dịch Việt-Anh, '/git owner/repo' Git Coach, '/vis nội dung' trực quan hóa, '/play nội dung' video giải thích, 'exit' thoát.\n") 
     while True:
         text = input("Bạn: ").strip()
         if not text:
@@ -108,6 +108,7 @@ def main():
                 print(f"Lỗi dịch: {e}\n")
                 continue
             print(f"\n{reply}\n[{model_name}]\n")
+            continue
         if text.startswith("/git "):
             repo_name = text[5:].strip()
             if not repo_name:
@@ -119,6 +120,7 @@ def main():
                 print(f"Lỗi Git Coach: {e}\n")
                 continue
             print(f"\n{reply}\n[{model_name}]\n")
+            continue
         if text.startswith("/vis "):
             vis_content = text[5:].strip()
             if not vis_content:
@@ -132,9 +134,20 @@ def main():
             print(f"\n{reply}\n\n[Đã lưu sơ đồ vào workspace/vis.md]\n[{model_name}]\n")
             continue
 
+        if text.startswith("/play "):
+            play_content = text[6:].strip()
+            if not play_content:
+                print("Dùng: /play chủ đề cần giải thích\n")
+                continue
+            try:
+                reply, model_name, meta = play(gemini_client, openai_clients, play_content)
+            except Exception as e:
+                print(f"Lỗi tạo video: {e}\n")
+                continue
+            print(f"\n[Đã mở video giải thích trong trình duyệt]\n[{model_name}]\n")
             continue
 
-            continue
+            
         if text.startswith("/web "):
             question = text[5:].strip()
             try:
