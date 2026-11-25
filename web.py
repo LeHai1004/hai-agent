@@ -1,8 +1,11 @@
 import os
 import threading
+import time
+import uuid
 import webbrowser
 from pathlib import Path
 
+import tools
 from pins import add_pin, format_pins, load_pins, remove_pin
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request, send_from_directory
@@ -23,6 +26,10 @@ app = Flask(__name__)
 MAX_UPLOAD_SIZE = 30 * 1024 * 1024
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_SIZE + 64 * 1024
 lock = threading.Lock()
+chat_jobs_lock = threading.Lock()
+chat_jobs = {}
+active_job_id = None
+confirm_context = threading.local()
 
 
 def make_clients():
@@ -45,6 +52,44 @@ def make_clients():
 gemini_client, openai_clients = make_clients()
 messages = load_history()
 usage = load_usage()
+
+
+def _web_confirm_handler(tool_name, reason, suggestion):
+    job_id = getattr(confirm_context, "job_id", None)
+    if job_id is None:
+        return False
+    with chat_jobs_lock:
+        job = chat_jobs.get(job_id)
+        if job is None or job["status"] != "running":
+            return False
+        job["confirmation_id"] += 1
+        job["confirmation"] = {
+            "id": job["confirmation_id"],
+            "tool": tool_name,
+            "reason": reason,
+            "suggestion": suggestion,
+        }
+        job["deadline"] = time.monotonic() + 60
+        job["decision"] = None
+        job["status"] = "confirmation"
+        job["decision_event"].clear()
+        deadline = job["deadline"]
+
+    signaled = job["decision_event"].wait(max(0, deadline - time.monotonic()))
+    with chat_jobs_lock:
+        approved = (
+            signaled
+            and job["decision"] is True
+            and time.monotonic() < deadline
+        )
+        job["status"] = "running"
+        job["confirmation"] = None
+        job["decision"] = None
+        return approved
+
+
+tools.CONFIRM_HANDLER = _web_confirm_handler
+
 
 PAGE = """<!DOCTYPE html>
 <html lang="vi"><head><meta charset="UTF-8">
@@ -72,6 +117,9 @@ body.panel-open #panel{display:flex}
 .user{background:#2a3a55;padding:10px 14px;border-radius:12px;margin-left:auto;width:fit-content;max-width:80%;white-space:pre-wrap}
 .bot{padding:4px 2px}
 .meta{color:#8b8f99;font-size:.78rem;margin-top:4px}
+.confirmation{padding:12px;background:#24262b;border:1px solid #4b5060;border-radius:10px;white-space:pre-wrap}
+.confirmation-actions{display:flex;gap:8px;margin-top:10px}
+.confirmation-status{color:#aeb4c0;font-size:.85rem;margin-top:8px}
 pre{background:#111214;padding:12px;border-radius:8px;overflow-x:auto}
 code{background:#111214;padding:1px 5px;border-radius:4px;font-family:Consolas,monospace}
 pre code{padding:0}
@@ -146,6 +194,70 @@ function addMsg(role, text, meta){
   log.scrollTop = log.scrollHeight;
   return d;
 }
+function addConfirmation(requestId, confirmation){
+  const card = document.createElement("div");
+  card.className = "msg bot confirmation";
+  const prompt = document.createElement("div");
+  prompt.textContent = `⚠ Tool '${confirmation.tool}' ${confirmation.reason}.\nGợi ý: ${confirmation.suggestion}.\n\nVẫn chạy?`;
+  const actions = document.createElement("div");
+  actions.className = "confirmation-actions";
+  const approve = document.createElement("button");
+  approve.textContent = "Đồng ý";
+  const cancel = document.createElement("button");
+  cancel.className = "ghost";
+  cancel.textContent = "Hủy";
+  const status = document.createElement("div");
+  status.className = "confirmation-status";
+  async function decide(approved){
+    approve.disabled = true;
+    cancel.disabled = true;
+    status.textContent = "Đang gửi xác nhận...";
+    try {
+      const response = await fetch("/confirm", {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({
+          request_id:requestId,
+          confirmation_id:confirmation.id,
+          approved
+        })
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || "Yêu cầu xác nhận đã hết hạn");
+      status.textContent = approved ? "Đã đồng ý. Đang tiếp tục..." : "Đã hủy. Đang xử lý...";
+    } catch (e) {
+      status.textContent = "Không gửi được xác nhận: " + e.message;
+      approve.disabled = false;
+      cancel.disabled = false;
+    }
+  }
+  approve.addEventListener("click", () => decide(true));
+  cancel.addEventListener("click", () => decide(false));
+  actions.append(approve, cancel);
+  card.append(prompt, actions, status);
+  log.appendChild(card);
+  log.scrollTop = log.scrollHeight;
+  return card;
+}
+async function waitForChat(requestId){
+  const confirmations = new Map();
+  while (true) {
+    const response = await fetch(`/api/chat/status/${encodeURIComponent(requestId)}`);
+    const state = await response.json();
+    if (!response.ok) throw new Error(state.error || "Không lấy được trạng thái chat");
+    if (state.status === "confirmation" && !confirmations.has(state.confirmation.id)) {
+      confirmations.set(
+        state.confirmation.id,
+        addConfirmation(requestId, state.confirmation)
+      );
+    }
+    if (state.status === "done") {
+      confirmations.forEach(card => card.remove());
+      return state.result;
+    }
+    await new Promise(resolve => setTimeout(resolve, 300));
+  }
+}
 async function send(){
   const text = box.value.trim();
   if (!text) return;
@@ -155,7 +267,9 @@ async function send(){
   sendBtn.disabled = true;
   try {
     const r = await fetch("/api/chat", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({text})});
-    const data = await r.json();
+    let data = await r.json();
+    if (!r.ok) throw new Error(data.error || "Yêu cầu thất bại");
+    if (data.pending) data = await waitForChat(data.request_id);
     wait.remove();
     if (data.new) log.innerHTML = "";
     const reply = data.reply || data.error || "(không có phản hồi)";
@@ -239,82 +353,168 @@ def history():
     return jsonify(messages)
 
 
+def _process_chat_message(text):
+    global messages
+    if text == "/new":
+        messages = []
+        save_history(messages)
+        return {"reply": "Đã bắt đầu cuộc chat mới.", "model": "", "new": True}
+    if text == "/pins" or text.startswith("/pin ") or text.startswith("/unpin"):
+        pins = load_pins()
+        if text == "/pins":
+            reply = format_pins(pins)
+        elif text.startswith("/unpin"):
+            reply = remove_pin(pins, text[6:].strip())
+        else:
+            reply = add_pin(pins, text[5:])
+        return {"reply": reply, "model": ""}
+    if text == "/en" or text.startswith("/en "):
+        sentence = text[3:].strip()
+        if not sentence:
+            return {"reply": "Dùng: /en câu cần dịch", "model": ""}
+        try:
+            reply, model_key, _ = translate(
+                gemini_client, openai_clients, sentence, open_browser=False)
+        except Exception as e:
+            return {"reply": f"Lỗi dịch: {e}", "model": ""}
+        reply = reply.replace(
+            "(Đã mở workspace/bilingual.html)",
+            "Đã dịch xong. Mở bản song ngữ: /bilingual",
+        )
+        return {"reply": reply, "model": model_key}
+    if text == "/read" or text.startswith("/read "):
+        args = text[5:].strip()
+        page_no = 1
+        head, _, tail = args.rpartition(" ")
+        if head and tail.isdigit():
+            args, page_no = head.strip(), int(tail)
+        args = args.strip('"')
+        if not args:
+            return {"reply": "Dùng: /read đường_dẫn.pdf [số trang]", "model": ""}
+        try:
+            reply, model_key = read_pdf_page(
+                gemini_client, openai_clients, args, page_no, open_browser=False)
+        except Exception as e:
+            return {"reply": f"Lỗi đọc PDF: {e}", "model": ""}
+        pdf_html_path = str(Path("workspace") / f"pdf_trang{page_no}.html")
+        reply = reply.replace(pdf_html_path, f"/pdfview/{page_no}")
+        return {"reply": reply, "model": model_key}
+
+    question, prompt, sources = text, text, []
+    if text.startswith("/web "):
+        question = text[5:].strip()
+        try:
+            results = web_search(question)
+        except Exception as e:
+            return {"reply": f"Lỗi tìm web: {e}", "model": ""}
+        if not results:
+            return {"reply": "Không tìm thấy kết quả nào.", "model": ""}
+        prompt = build_prompt(question, results)
+        sources = [(r.get("title", ""), r.get("href", "")) for r in results]
+    try:
+        answer, model_key, meta = ask(
+            gemini_client, openai_clients, messages, prompt, use_history=not sources)
+    except Exception as e:
+        return {"reply": f"Lỗi: tất cả model đều thất bại. {e}", "model": ""}
+    saved = answer
+    if sources:
+        saved += "\n\nNguồn:\n" + "\n".join(
+            f"[{i}] {t}: {u}" for i, (t, u) in enumerate(sources, 1))
+    messages.append({"role": "user", "text": question})
+    messages.append({"role": "model", "text": saved})
+    save_history(messages)
+    record_usage(usage, model_key, meta)
+    return {"reply": saved, "model": model_key, "usage": format_usage(usage, model_key)}
+
+
+def _run_chat_job(job_id, text):
+    global active_job_id
+    confirm_context.job_id = job_id
+    try:
+        with lock:
+            result = _process_chat_message(text)
+    except Exception as e:
+        result = {"reply": f"Lỗi xử lý: {e}", "model": ""}
+    finally:
+        del confirm_context.job_id
+        with chat_jobs_lock:
+            job = chat_jobs.get(job_id)
+            if job is not None:
+                job["result"] = result
+                job["status"] = "done"
+                job["confirmation"] = None
+            if active_job_id == job_id:
+                active_job_id = None
+
+
 @app.post("/api/chat")
 def chat():
-    global messages
+    global active_job_id
     text = (request.get_json(silent=True) or {}).get("text", "").strip()
     if not text:
         return jsonify(error="Tin nhắn trống"), 400
-    with lock:
-        if text == "/new":
-            messages = []
-            save_history(messages)
-            return jsonify(reply="Đã bắt đầu cuộc chat mới.", model="", new=True)
-        if text == "/pins" or text.startswith("/pin ") or text.startswith("/unpin"):
-            pins = load_pins()
-            if text == "/pins":
-                reply = format_pins(pins)
-            elif text.startswith("/unpin"):
-                reply = remove_pin(pins, text[6:].strip())
-            else:
-                reply = add_pin(pins, text[5:])
-            return jsonify(reply=reply, model="")
-        if text == "/en" or text.startswith("/en "):
-            sentence = text[3:].strip()
-            if not sentence:
-                return jsonify(reply="Dùng: /en câu cần dịch", model="")
-            try:
-                reply, model_key, _ = translate(
-                    gemini_client, openai_clients, sentence, open_browser=False)
-            except Exception as e:
-                return jsonify(reply=f"Lỗi dịch: {e}", model="")
-            reply = reply.replace(
-                "(Đã mở workspace/bilingual.html)",
-                "Đã dịch xong. Mở bản song ngữ: /bilingual",
-            )
-            return jsonify(reply=reply, model=model_key)
-        if text == "/read" or text.startswith("/read "):
-            args = text[5:].strip()
-            page_no = 1
-            head, _, tail = args.rpartition(" ")
-            if head and tail.isdigit():
-                args, page_no = head.strip(), int(tail)
-            args = args.strip('"')
-            if not args:
-                return jsonify(reply="Dùng: /read đường_dẫn.pdf [số trang]", model="")
-            try:
-                reply, model_key = read_pdf_page(
-                    gemini_client, openai_clients, args, page_no, open_browser=False)
-            except Exception as e:
-                return jsonify(reply=f"Lỗi đọc PDF: {e}", model="")
-            pdf_html_path = str(Path("workspace") / f"pdf_trang{page_no}.html")
-            reply = reply.replace(pdf_html_path, f"/pdfview/{page_no}")
-            return jsonify(reply=reply, model=model_key)
-        question, prompt, sources = text, text, []
-        if text.startswith("/web "):
-            question = text[5:].strip()
-            try:
-                results = web_search(question)
-            except Exception as e:
-                return jsonify(reply=f"Lỗi tìm web: {e}", model="")
-            if not results:
-                return jsonify(reply="Không tìm thấy kết quả nào.", model="")
-            prompt = build_prompt(question, results)
-            sources = [(r.get("title", ""), r.get("href", "")) for r in results]
-        try:
-            answer, model_key, meta = ask(
-                gemini_client, openai_clients, messages, prompt, use_history=not sources)
-        except Exception as e:
-            return jsonify(reply=f"Lỗi: tất cả model đều thất bại. {e}", model="")
-        saved = answer
-        if sources:
-            saved += "\n\nNguồn:\n" + "\n".join(
-                f"[{i}] {t}: {u}" for i, (t, u) in enumerate(sources, 1))
-        messages.append({"role": "user", "text": question})
-        messages.append({"role": "model", "text": saved})
-        save_history(messages)
-        record_usage(usage, model_key, meta)
-        return jsonify(reply=saved, model=model_key, usage=format_usage(usage, model_key))
+    with chat_jobs_lock:
+        if active_job_id is not None:
+            return jsonify(error="Yêu cầu trước vẫn đang xử lý."), 409
+        now = time.monotonic()
+        for old_id, old_job in list(chat_jobs.items()):
+            if old_job["status"] == "done" and now - old_job["created_at"] > 600:
+                del chat_jobs[old_id]
+        job_id = uuid.uuid4().hex
+        chat_jobs[job_id] = {
+            "created_at": now,
+            "status": "running",
+            "confirmation": None,
+            "confirmation_id": 0,
+            "deadline": None,
+            "decision": None,
+            "decision_event": threading.Event(),
+            "result": None,
+        }
+        active_job_id = job_id
+        threading.Thread(
+            target=_run_chat_job, args=(job_id, text), daemon=True).start()
+    return jsonify(pending=True, request_id=job_id), 202
+
+
+@app.get("/api/chat/status/<request_id>")
+def chat_status(request_id):
+    with chat_jobs_lock:
+        job = chat_jobs.get(request_id)
+        if job is None:
+            return jsonify(error="Không tìm thấy yêu cầu chat."), 404
+        response = {"status": job["status"]}
+        if job["status"] == "confirmation":
+            response["confirmation"] = job["confirmation"]
+        elif job["status"] == "done":
+            response["result"] = job["result"]
+        return jsonify(response)
+
+
+@app.post("/confirm")
+def confirm():
+    data = request.get_json(silent=True) or {}
+    request_id = data.get("request_id")
+    confirmation_id = data.get("confirmation_id")
+    approved = data.get("approved")
+    if not isinstance(request_id, str) or type(confirmation_id) is not int:
+        return jsonify(error="Thiếu mã yêu cầu xác nhận."), 400
+    if not isinstance(approved, bool):
+        return jsonify(error="Quyết định xác nhận không hợp lệ."), 400
+    with chat_jobs_lock:
+        job = chat_jobs.get(request_id)
+        if (
+            job is None
+            or job["status"] != "confirmation"
+            or job["confirmation_id"] != confirmation_id
+            or job["deadline"] is None
+            or time.monotonic() >= job["deadline"]
+            or job["decision_event"].is_set()
+        ):
+            return jsonify(error="Yêu cầu xác nhận đã hết hạn hoặc không còn hiệu lực."), 409
+        job["decision"] = approved
+        job["decision_event"].set()
+    return jsonify(ok=True)
 
 
 if __name__ == "__main__":

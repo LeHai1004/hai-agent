@@ -29,12 +29,19 @@ NANG = {
 }
 
 
+def _confirm_terminal(tool_name, ly_do, goi_y):
+    print(f"\n⚠ Tool '{tool_name}' {ly_do}.")
+    print(f"  Gợi ý: {goi_y}.")
+    return input("  Vẫn chạy? (y/n): ").strip().lower() == "y"
+
+
+CONFIRM_HANDLER = _confirm_terminal
+
+
 def _hoi_truoc(fn, ly_do, goi_y):
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
-        print(f"\n⚠ Tool '{fn.__name__}' {ly_do}.")
-        print(f"  Gợi ý: {goi_y}.")
-        if input("  Vẫn chạy? (y/n): ").strip().lower() != "y":
+        if not CONFIRM_HANDLER(fn.__name__, ly_do, goi_y):
             return ("Người dùng đã từ chối chạy tool này. Không gọi lại tool nào, "
                     "chỉ trả lời ngắn gọn rằng đã hủy.")
         return fn(*args, **kwargs)
