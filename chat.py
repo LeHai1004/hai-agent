@@ -12,6 +12,7 @@ from history import load_history, save_history
 from usage import format_usage, load_usage, record_usage
 from search import build_prompt, web_search
 from llm import ask
+from pins import load_pins, add_pin, remove_pin, format_pins
 
 load_dotenv()
 
@@ -51,17 +52,27 @@ def main():
         return
 
     messages = load_history()
+    pins = load_pins()
     usage = load_usage()
     da_bao = False
 
     print(f"Chatbot. Đã nạp {len(messages)} tin nhắn cũ.")
-    print("Lệnh: '/new' chat mới, '/usage' xem lượt dùng, '/web câu hỏi' tìm web, '/en câu' dịch Việt-Anh, '/git owner/repo' Git Coach, '/vis nội dung' trực quan hóa, '/play nội dung' video giải thích, 'exit' thoát.\n") 
+    print("Lệnh: '/new' chat mới, '/usage' xem lượt dùng, '/web câu hỏi' tìm web, '/en câu' dịch Việt-Anh, '/git owner/repo' Git Coach, '/vis nội dung' trực quan hóa, '/play nội dung' video giải thích, '/pin nội dung' ghim ghi chú, '/pins' xem ghim, '/unpin số' bỏ ghim, 'exit' thoát.\n")
     while True:
         text = input("Bạn: ").strip()
         if not text:
             continue
         if text.lower() in ("exit", "quit"):
             break
+        if text.startswith("/pin "):
+            print(add_pin(pins, text[5:]) + "\n")
+            continue
+        if text == "/pins":
+            print(format_pins(pins) + "\n")
+            continue
+        if text.startswith("/unpin"):
+            print(remove_pin(pins, text[6:].strip()) + "\n")
+            continue
         if text == "/new":
             messages = []
             da_bao = False

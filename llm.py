@@ -9,6 +9,7 @@ from tools import TOOLS
 import re
 from config import MODELS, LIMITS
 from usage import load_usage
+from pins import load_pins, pins_as_context
 
 SYSTEM_INSTRUCTION = (
     "Trả lời bằng tiếng Việt, ngắn gọn. "
@@ -157,13 +158,18 @@ def available_models(text):
 
 def ask(gemini_client, openai_clients, messages, text, use_history=True, route_text=None):
     last_error = None
+    pins_context = pins_as_context(load_pins())
+    system_instruction = SYSTEM_INSTRUCTION
+    if pins_context:
+        system_instruction += "\n\n" + pins_context
+
     for provider, model in available_models(route_text or text):
         try:
             if provider == "gemini":
                 history = to_contents(messages) if use_history else []
                 config = types.GenerateContentConfig(
                     tools=TOOLS,
-                    system_instruction=SYSTEM_INSTRUCTION,
+                    system_instruction=system_instruction,
                 )
                 chat = gemini_client.chats.create(model=model, history=history, config=config)
                 reply = chat.send_message(text)
@@ -175,7 +181,7 @@ def ask(gemini_client, openai_clients, messages, text, use_history=True, route_t
                 if not client:
                     continue
                 hist = messages if use_history else []
-                conv = to_openai_messages(hist, SYSTEM_INSTRUCTION)
+                conv = to_openai_messages(hist, system_instruction)
                 conv.append({"role": "user", "content": text})
                 reply_text, total = run_openai(client, model, conv)
                 meta = UsageMeta(total)
