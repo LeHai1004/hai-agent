@@ -4,9 +4,10 @@ import webbrowser
 from pathlib import Path
 
 import pymupdf
-from llm import ask
+from llm import ask, has_foreign_chars
 
 CHUNK = 10  # số khối gửi dịch mỗi lần gọi model
+FOREIGN_WARNING = "[có thể lẫn ký tự lạ]"
 
 
 def extract_pages(path):
@@ -55,13 +56,23 @@ def translate_blocks(gemini_client, openai_clients, blocks):
         prompt = (
             "Dịch từng đoạn tiếng Anh sau sang tiếng Việt, giữ đúng thứ tự và đúng số lượng đoạn. "
             "Giữ nguyên tên riêng, từ viết tắt và thuật ngữ (5G, AI, ...). "
+            "Chỉ viết bằng tiếng Việt và tiếng Anh. Tuyệt đối không dùng chữ Thái hay ký tự của ngôn ngữ khác. "
             f"Chỉ trả về JSON hợp lệ, không dùng khối ```, dạng {{\"vi\": [...]}} gồm đúng {len(part)} chuỗi.\n\n"
             + numbered
         )
         reply, model_name, _ = ask(gemini_client, openai_clients, [], prompt,
                                    use_history=False, route_text="dịch")
+        if has_foreign_chars(reply):
+            reply, model_name, _ = ask(
+                gemini_client, openai_clients, [], prompt,
+                use_history=False, route_text="dịch",
+                model_override="gemini/gemini-3.5-flash",
+            )
         vi = parse_vi(reply, len(part))
-        result.extend(vi if vi else ["(không dịch được đoạn này)"] * len(part))
+        translated = vi if vi else ["(không dịch được đoạn này)"] * len(part)
+        if has_foreign_chars(reply):
+            translated[0] = FOREIGN_WARNING + " " + translated[0]
+        result.extend(translated)
     return result, model_name
 
 CACHE_PATH = os.path.join("history", "pdf_cache.json")
@@ -143,13 +154,28 @@ def read_pdf_page(gemini_client, openai_clients, path, page_no, open_browser=Tru
     cache = load_cache()
     key = cache_key(path, page_no)
     hit = cache.get(key)
-    if hit and hit.get("blocks") == blocks and len(hit.get("vi", [])) == len(blocks):
+    hit_vi = hit.get("vi", []) if isinstance(hit, dict) else []
+    hit_has_foreign = any(
+        has_foreign_chars(v) or v.startswith(FOREIGN_WARNING)
+        for v in hit_vi if isinstance(v, str)
+    )
+    if hit_has_foreign:
+        cache.pop(key, None)
+    if (hit and not hit_has_foreign and hit.get("blocks") == blocks
+            and len(hit_vi) == len(blocks)):
         vi, model_name = hit["vi"], "cache, không tốn lượt"
     else:
         vi, model_name = translate_blocks(gemini_client, openai_clients, blocks)
-        if not any(v.startswith("(không dịch được") for v in vi):
+        if (not any(v.startswith("(không dịch được") for v in vi)
+                and not any(has_foreign_chars(v) or v.startswith(FOREIGN_WARNING) for v in vi)):
             cache[key] = {"blocks": blocks, "vi": vi}
             save_cache(cache)
+        elif hit_has_foreign:
+            save_cache(cache)
+    warning = any(v.startswith(FOREIGN_WARNING) for v in vi)
     out = save_pdf_html(
         blocks, vi, page_no, total, os.path.basename(path), open_browser=open_browser)
-    return f"Đã dịch trang {page_no}/{total} ({len(blocks)} đoạn), mở {out}. Xem trang khác: /read {path} {page_no + 1}", model_name
+    message = f"Đã dịch trang {page_no}/{total} ({len(blocks)} đoạn), mở {out}. Xem trang khác: /read {path} {page_no + 1}"
+    if warning:
+        message = FOREIGN_WARNING + " " + message
+    return message, model_name

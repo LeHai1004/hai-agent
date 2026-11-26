@@ -2,13 +2,14 @@ import json
 import os
 import webbrowser
 from pathlib import Path
-from llm import ask
+from llm import ask, has_foreign_chars
 
 
 def build_en_prompt(text):
     return (
         "Bạn là gia sư tiếng Anh. Nếu input là tiếng Việt thì dịch sang tiếng Anh, "
         "nếu là tiếng Anh thì dịch sang tiếng Việt. Tách input thành 1 đến 6 câu.\n"
+        "Chỉ viết bằng tiếng Việt và tiếng Anh. Tuyệt đối không dùng chữ Thái hay ký tự của ngôn ngữ khác.\n"
         "Chỉ trả về JSON hợp lệ, không có chữ nào ngoài JSON, không dùng khối ```. Dạng:\n"
         '{"pairs":[{"en":"English sentence","vi":"câu tiếng Việt"}],'
         '"vocab":[{"en":"word or phrase","vi":"nghĩa"}]}\n'
@@ -113,15 +114,29 @@ def save_bilingual_html(data, open_browser=True):
 
 
 def translate(gemini_client, openai_clients, text, open_browser=True):
+    prompt = build_en_prompt(text)
     reply, model_name, meta = ask(
-        gemini_client, openai_clients, [], build_en_prompt(text),
+        gemini_client, openai_clients, [], prompt,
         use_history=False, route_text=text,
     )
+    if has_foreign_chars(reply):
+        reply, model_name, meta = ask(
+            gemini_client, openai_clients, [], prompt,
+            use_history=False, route_text=text,
+            model_override="gemini/gemini-3.5-flash",
+        )
+    warning = has_foreign_chars(reply)
     data = parse_translation(reply)
     if data is None:
+        if warning:
+            reply = "[có thể lẫn ký tự lạ] " + reply
         return reply, model_name, meta
+    if warning:
+        data["pairs"][0]["vi"] = "[có thể lẫn ký tự lạ] " + data["pairs"][0]["vi"]
     save_bilingual_html(data, open_browser=open_browser)
     lines = []
+    if warning:
+        lines.append("[có thể lẫn ký tự lạ]")
     for p in data["pairs"]:
         lines.append(f"EN: {p['en']}")
         lines.append(f"VI: {p['vi']}")

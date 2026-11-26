@@ -122,6 +122,22 @@ def has_word(text, w):
     return re.search(rf"\b{re.escape(w)}\b", text) is not None
 
 
+FOREIGN_CHAR_RE = re.compile(
+    r"[\u0E00-\u0E7F"
+    r"\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF"
+    r"\u1100-\u11FF\u3130-\u318F\uAC00-\uD7AF"
+    r"\u3040-\u30FF\u31F0-\u31FF\uFF65-\uFF9F"
+    r"\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF"
+    r"\uFB50-\uFDFF\uFE70-\uFEFF"
+    r"\u0400-\u04FF\u0500-\u052F\u1C80-\u1C8F"
+    r"\u2DE0-\u2DFF\uA640-\uA69F\uA6A0-\uA6FF]"
+)
+
+
+def has_foreign_chars(text):
+    return FOREIGN_CHAR_RE.search(text) is not None
+
+
 def score_question(text):
     t = text.lower()
     s = 0
@@ -156,14 +172,20 @@ def available_models(text):
         ok.append((provider, model))
     return ok or ordered
 
-def ask(gemini_client, openai_clients, messages, text, use_history=True, route_text=None, image=None):
+def ask(gemini_client, openai_clients, messages, text, use_history=True, route_text=None, image=None,
+        model_override=None):
     last_error = None
     pins_context = pins_as_context(load_pins())
     system_instruction = SYSTEM_INSTRUCTION
     if pins_context:
         system_instruction += "\n\n" + pins_context
 
-    models = available_models(route_text or text)
+    if model_override:
+        models = [m for m in MODELS if f"{m[0]}/{m[1]}" == model_override]
+        if not models:
+            raise ValueError(f"Không tìm thấy model: {model_override}")
+    else:
+        models = available_models(route_text or text)
     if image:
         models = [m for m in models if m[0] == "gemini"]
     for provider, model in models:
