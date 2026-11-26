@@ -2,6 +2,7 @@ import html
 import json
 import os
 import re
+import shutil
 import threading
 import time
 import uuid
@@ -11,7 +12,14 @@ from pathlib import Path
 from urllib.parse import quote
 
 import tools
-from pins import add_pin, format_pins, load_pins, remove_pin
+from pins import (
+    add_pin,
+    format_pins,
+    is_valid_project_name,
+    load_pins,
+    remove_pin,
+    save_pins,
+)
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request, send_from_directory
 from transfer import EXPORT_DIR, export_chat, import_chat, list_exports
@@ -45,8 +53,107 @@ chat_jobs_lock = threading.Lock()
 chat_jobs = {}
 active_job_id = None
 confirm_context = threading.local()
-CHAT_DIR = Path("history", "chats")
+PROJECTS_DIR = Path("history", "projects")
+CURRENT_PROJECT_PATH = Path("history", "current_project.txt")
+LEGACY_CHAT_DIR = Path("history", "chats")
 CHAT_ID_PATTERN = re.compile(r"\d{8}_\d{4}(?:\d{2}(?:_\d{6})?)?")
+
+
+def _load_current_project():
+    try:
+        name = CURRENT_PROJECT_PATH.read_text(encoding="utf-8").strip()
+    except OSError:
+        return "default"
+    project_dir = PROJECTS_DIR / name if is_valid_project_name(name) else None
+    if project_dir is None or project_dir.is_symlink() or not project_dir.is_dir():
+        return "default"
+    return name
+
+
+current_project = _load_current_project()
+
+
+def _project_dir(project=None):
+    name = current_project if project is None else project
+    if not is_valid_project_name(name):
+        raise ValueError("Tên project không hợp lệ.")
+    return PROJECTS_DIR / name
+
+
+def _chat_dir(project=None):
+    return _project_dir(project) / "chats"
+
+
+def _ensure_project_layout(project):
+    project_dir = _project_dir(project)
+    if project_dir.is_symlink():
+        raise ValueError("Thư mục project không hợp lệ.")
+    project_dir.mkdir(parents=True, exist_ok=True)
+    chats_dir = _chat_dir(project)
+    if chats_dir.is_symlink():
+        raise ValueError("Thư mục chat của project không hợp lệ.")
+    chats_dir.mkdir(exist_ok=True)
+    pins_path = project_dir / "pins.json"
+    if pins_path.is_symlink():
+        raise ValueError("Tệp ghim của project không hợp lệ.")
+    if not pins_path.exists():
+        save_pins([], project)
+
+
+def _migrate_legacy_data():
+    default_dir = _project_dir("default")
+    default_dir.mkdir(parents=True, exist_ok=True)
+    default_chats = _chat_dir("default")
+    default_chats.mkdir(exist_ok=True)
+
+    legacy_pins = Path("history", "pins.json")
+    default_pins = default_dir / "pins.json"
+    if not default_pins.exists():
+        if legacy_pins.is_file() and not legacy_pins.is_symlink():
+            shutil.copy2(legacy_pins, default_pins)
+        else:
+            save_pins([], "default")
+
+    if LEGACY_CHAT_DIR.is_dir() and not LEGACY_CHAT_DIR.is_symlink():
+        for path in LEGACY_CHAT_DIR.glob("*.json"):
+            if (
+                CHAT_ID_PATTERN.fullmatch(path.stem)
+                and path.is_file()
+                and not path.is_symlink()
+            ):
+                destination = default_chats / path.name
+                if not destination.exists():
+                    shutil.copy2(path, destination)
+
+
+def _save_current_project():
+    CURRENT_PROJECT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = CURRENT_PROJECT_PATH.with_suffix(".txt.tmp")
+    temporary_path.write_text(current_project + "\n", encoding="utf-8")
+    temporary_path.replace(CURRENT_PROJECT_PATH)
+
+
+def _list_projects():
+    projects = [
+        path.name
+        for path in PROJECTS_DIR.iterdir()
+        if is_valid_project_name(path.name)
+        and path.is_dir()
+        and not path.is_symlink()
+    ]
+    return sorted(projects, key=lambda name: (name != "default", name.lower()))
+
+
+def _switch_project(name):
+    global current_project, current_chat_id, messages
+    if name == current_project:
+        return
+    _save_current_chat()
+    messages = []
+    current_chat_id = None
+    save_history(messages)
+    current_project = name
+    _save_current_project()
 
 
 def looks_personal(text):
@@ -82,7 +189,7 @@ def _workspace_file_mtimes():
 def _chat_path(chat_id):
     if not isinstance(chat_id, str) or not CHAT_ID_PATTERN.fullmatch(chat_id):
         return None
-    return CHAT_DIR / f"{chat_id}.json"
+    return _chat_dir() / f"{chat_id}.json"
 
 
 def _read_chat(path):
@@ -98,10 +205,11 @@ def _read_chat(path):
 
 
 def _list_chats():
-    if not CHAT_DIR.is_dir():
+    chat_dir = _chat_dir()
+    if not chat_dir.is_dir():
         return []
     chats = []
-    for path in CHAT_DIR.glob("*.json"):
+    for path in chat_dir.glob("*.json"):
         if (
             _chat_path(path.stem) is None
             or path.is_symlink()
@@ -134,7 +242,8 @@ def _save_current_chat():
         return
     if current_chat_id is None:
         current_chat_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    CHAT_DIR.mkdir(parents=True, exist_ok=True)
+    chat_dir = _chat_dir()
+    chat_dir.mkdir(parents=True, exist_ok=True)
     path = _chat_path(current_chat_id)
     if path is None:
         raise ValueError("Mã cuộc chat không hợp lệ.")
@@ -151,10 +260,11 @@ def _save_current_chat():
 
 
 def _find_saved_chat(messages):
-    if not CHAT_DIR.is_dir():
+    chat_dir = _chat_dir()
+    if not chat_dir.is_dir():
         return None
     chats = []
-    for path in CHAT_DIR.glob("*.json"):
+    for path in chat_dir.glob("*.json"):
         if (
             _chat_path(path.stem) is None
             or path.is_symlink()
@@ -185,6 +295,10 @@ def make_clients():
             api_key=os.environ["OPENROUTER_API_KEY"], base_url="https://openrouter.ai/api/v1")
     return gemini_client, openai_clients
 
+
+_migrate_legacy_data()
+_ensure_project_layout(current_project)
+_save_current_project()
 
 gemini_client, openai_clients = make_clients()
 current_chat_id = None
@@ -264,6 +378,9 @@ body.sidebar-collapsed #chat-sidebar{display:none}
 .chat-open{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;background:#2e3036;padding:8px}
 .chat-delete{flex:0 0 30px;padding:4px;background:#2e3036;color:#aaa}
 .chat-delete:hover{background:#7f1d1d;color:#fff}
+.project-controls{display:flex;gap:6px;margin-bottom:10px}
+#project-select{flex:1;min-width:0;padding:6px;border:1px solid #3a3d45;border-radius:6px;background:#24262b;color:#e8e8ea}
+#create-project{padding:6px 8px;font-size:.78rem;white-space:nowrap}
 #chat{display:flex;flex:1 1 auto;flex-direction:column;min-width:0}
 #splitter{display:none;flex:0 0 6px;cursor:col-resize;background:#2e3036;z-index:2;touch-action:none;transition:background .12s,box-shadow .12s}
 body.panel-open #splitter{display:block}
@@ -308,7 +425,12 @@ textarea{flex:1;resize:none;height:56px;padding:12px;border-radius:10px;border:1
 <button class="ghost" id="toggle-sidebar" aria-label="Thu gọn danh sách chat">☰</button>
 <button class="ghost" id="new">Chat mới</button></div></header>
 <main id="layout">
-<aside id="chat-sidebar"><div class="sidebar-head"><b>Cuộc chat</b></div><div id="chat-list"></div></aside>
+<aside id="chat-sidebar"><div class="sidebar-head">
+<div class="project-controls">
+<select id="project-select" aria-label="Project"></select>
+<button type="button" class="ghost" id="create-project">+ Project mới</button>
+</div>
+<b>Cuộc chat</b></div><div id="chat-list"></div></aside>
 <section id="chat">
 <div id="log"></div>
 <footer>
@@ -334,6 +456,7 @@ const panelFrame = document.getElementById("panel-frame");
 const panelTitle = document.getElementById("panel-title");
 const splitter = document.getElementById("splitter");
 const chatList = document.getElementById("chat-list");
+const projectSelect = document.getElementById("project-select");
 const attachBtn = document.getElementById("attach");
 const pdfFileInput = document.getElementById("pdf-file");
 let pendingImagePreview = null;
@@ -585,6 +708,28 @@ async function waitForChat(requestId){
     await new Promise(resolve => setTimeout(resolve, 300));
   }
 }
+async function refreshProjects(){
+  const response = await fetch("/projects");
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Không tải được danh sách project");
+  projectSelect.innerHTML = "";
+  data.projects.forEach(name => {
+    const option = document.createElement("option");
+    option.value = name;
+    option.textContent = name;
+    projectSelect.appendChild(option);
+  });
+  projectSelect.value = data.current;
+}
+async function switchProject(name){
+  const response = await fetch(`/projects/switch/${encodeURIComponent(name)}`, {method:"POST"});
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Không chuyển được project");
+  log.innerHTML = "";
+  document.getElementById("usage").textContent = "";
+  await refreshProjects();
+  await refreshChats();
+}
 async function refreshChats(){
   const response = await fetch("/chats");
   const chats = await response.json();
@@ -708,9 +853,40 @@ document.getElementById("new").addEventListener("click", () => { box.value = "/n
 document.getElementById("toggle-sidebar").addEventListener("click", () => {
   document.body.classList.toggle("sidebar-collapsed");
 });
+projectSelect.addEventListener("change", () => {
+  switchProject(projectSelect.value).catch(error => {
+    addMsg("bot", "Lỗi chuyển project: " + error.message);
+    refreshProjects().catch(refreshError => console.error("Không tải được danh sách project:", refreshError));
+  });
+});
+document.getElementById("create-project").addEventListener("click", async () => {
+  const enteredName = window.prompt("Tên project (chỉ chữ, số, gạch ngang hoặc gạch dưới):");
+  if (enteredName === null) return;
+  const name = enteredName.trim();
+  if (!/^[A-Za-z0-9_-]+$/.test(name)) {
+    window.alert("Tên project chỉ được chứa chữ, số, gạch ngang và gạch dưới.");
+    return;
+  }
+  try {
+    const response = await fetch("/projects/new", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({name})
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Không tạo được project");
+    log.innerHTML = "";
+    document.getElementById("usage").textContent = "";
+    await refreshProjects();
+    await refreshChats();
+  } catch (error) {
+    addMsg("bot", "Lỗi tạo project: " + error.message);
+  }
+});
 fetch("/api/history").then(r => r.json()).then(list => {
   list.forEach(m => addMsg(m.role === "user" ? "user" : "bot", m.text));
 }).catch(error => console.error("Không tải được lịch sử chat:", error));
+refreshProjects().catch(error => console.error("Không tải được danh sách project:", error));
 refreshChats().catch(error => console.error("Không tải được danh sách chat:", error));
 box.focus();
 </script></body></html>"""
@@ -861,6 +1037,38 @@ def chats():
         return jsonify(_list_chats())
 
 
+@app.get("/projects")
+def projects():
+    with lock:
+        return jsonify(projects=_list_projects(), current=current_project)
+
+
+@app.post("/projects/new")
+def new_project():
+    data = request.get_json(silent=True)
+    name = data.get("name") if isinstance(data, dict) else None
+    if not is_valid_project_name(name):
+        return jsonify(error="Tên project chỉ được chứa chữ, số, gạch ngang và gạch dưới."), 400
+    with lock:
+        project_dir = _project_dir(name)
+        if project_dir.exists():
+            return jsonify(error="Project đã tồn tại."), 409
+        _ensure_project_layout(name)
+        _switch_project(name)
+        return jsonify(projects=_list_projects(), current=current_project), 201
+
+
+@app.post("/projects/switch/<name>")
+def switch_project(name):
+    if not is_valid_project_name(name):
+        return jsonify(error="Tên project không hợp lệ."), 400
+    with lock:
+        if name not in _list_projects():
+            return jsonify(error="Không tìm thấy project."), 404
+        _switch_project(name)
+        return jsonify(projects=_list_projects(), current=current_project)
+
+
 @app.post("/chats/open/<chat_id>")
 def open_chat(chat_id):
     global current_chat_id, messages
@@ -948,13 +1156,13 @@ def _process_chat_message(text):
             "history": messages,
         }
     if text == "/pins" or text.startswith("/pin ") or text.startswith("/unpin"):
-        pins = load_pins()
+        pins = load_pins(current_project)
         if text == "/pins":
             reply = format_pins(pins)
         elif text.startswith("/unpin"):
-            reply = remove_pin(pins, text[6:].strip())
+            reply = remove_pin(pins, text[6:].strip(), current_project)
         else:
-            reply = add_pin(pins, text[5:])
+            reply = add_pin(pins, text[5:], current_project)
         return {"reply": reply, "model": ""}
     if text == "/en" or text.startswith("/en "):
         sentence = text[3:].strip()
