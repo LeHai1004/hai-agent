@@ -25,9 +25,9 @@ Tự xây chatbot/agent riêng, dùng hằng ngày, không lo hết lượt.
 
 **Chạy:** `python chat.py` trong .venv (Python 3.12). Key trong .env: GEMINI_API_KEY, GROQ_API_KEY, OPENROUTER_API_KEY (tùy chọn GITHUB_TOKEN cho repo riêng tư).
 
-**Lệnh trong chat:** /new, /usage, /web câu hỏi, /en câu, /git owner/repo, /vis nội dung, /export, /import, exit.
+**Lệnh trong chat:** /new, /usage, /web câu hỏi, /en câu, /git owner/repo, /vis nội dung, /nho nội dung, /bonho, /quen số, /export, /import, exit. Bộ nhớ toàn cục lưu ở history/memory/global.json; hệ thống tự trích xuất thông tin phù hợp sau mỗi câu trả lời, hỗ trợ yêu cầu nhớ/quên bằng lời tự nhiên và có nhánh dự phòng khi rời chat.
 
-**File chính:** chat.py (vòng lặp chat, cảnh báo lịch sử dài NGUONG_CANH_BAO=8000), llm.py (gọi model, chạy tool, chọn model theo câu hỏi bằng HARD_WORDS, SYSTEM_INSTRUCTION), config.py, history.py, usage.py, search.py (/web bằngDuckDuckGo), transfer.py (export/import), translate.py (/en), gitcoach.py (/git), visual.py (/vis - xuất cả vis.md và vis.html hoạt hình).
+**File chính:** chat.py (vòng lặp chat, cảnh báo lịch sử dài NGUONG_CANH_BAO=8000), llm.py (gọi model, chạy tool, chọn model theo câu hỏi bằng HARD_WORDS, SYSTEM_INSTRUCTION), memory.py (bộ nhớ toàn cục), config.py, history.py, usage.py, search.py (/web bằngDuckDuckGo), transfer.py (export/import), translate.py (/en), gitcoach.py (/git), visual.py (/vis - xuất cả vis.md và vis.html hoạt hình).
 
 **Workspace:** project `default` dùng `workspace/` để giữ tương thích; project khác dùng `history/projects/<tên>/workspace/`.
 

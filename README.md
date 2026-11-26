@@ -8,12 +8,16 @@ Chatbot/agent chạy trong terminal, tự xây bằng Python. Không phụ thu�
 - **Tool calling:** tìm web, đọc 1 trang web, đọc/ghi file trong workspace của project (ghi file luôn hỏi y/n), tạo file Word, đọc repo GitHub.
 - **Lệnh riêng:** dịch song ngữ `/en`, phân tích repo `/git`, giải thích trực quan có hoạt hình `/vis`.
 - **Lịch sử và lượt dùng:** lưu hội thoại, xem lượt dùng, export/import lịch sử.
+- **Bộ nhớ toàn cục:** sau mỗi câu trả lời, trích xuất ngầm thông tin phù hợp do người dùng nói; hỗ trợ yêu cầu nhớ/quên bằng lời tự nhiên và dùng chung giữa mọi project.
 
 ## Lệnh
 
 | Lệnh              | Tác dụng                                                                               |
 | ----------------- | -------------------------------------------------------------------------------------- |
 | `/new`            | Bắt đầu cuộc chat mới                                                                  |
+| `/nho nội dung`   | Ghi nhớ thông tin trên mọi project                                                     |
+| `/bonho`          | Liệt kê bộ nhớ toàn cục                                                                |
+| `/quen số`        | Xóa mục bộ nhớ theo số thứ tự                                                          |
 | `/usage`          | Xem lượt dùng các model                                                                |
 | `/web câu hỏi`    | Tìm web (DuckDuckGo) rồi trả lời kèm nguồn                                             |
 | `/en câu`         | Tự nhận diện chiều Việt-Anh/Anh-Việt, kèm vài từ vựng chính                            |

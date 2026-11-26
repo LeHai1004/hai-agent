@@ -6,6 +6,7 @@ import shutil
 import threading
 import time
 import uuid
+from collections import deque
 import webbrowser
 from datetime import datetime
 from pathlib import Path
@@ -31,6 +32,22 @@ from werkzeug.utils import secure_filename
 
 from history import load_history, save_history
 from llm import ask
+from memory import (
+    MAX_MEMORIES,
+    add_memory,
+    add_memories,
+    build_deletion_prompt,
+    build_extraction_prompt,
+    delete_memory,
+    delete_memory_by_number,
+    edit_memory,
+    extract_memories as validate_extracted_memories,
+    has_memory_hint,
+    list_memories,
+    memory_intent,
+    memory_log,
+    parse_delete_ids,
+)
 from filechat import ask_file
 from img import ask_image
 from pdfread import parse_read_command, read_pdf_page
@@ -53,6 +70,11 @@ lock = threading.Lock()
 chat_jobs_lock = threading.Lock()
 chat_jobs = {}
 active_job_id = None
+memory_extraction_jobs = set()
+memory_extraction_jobs_lock = threading.Lock()
+memory_completed_messages = {}
+memory_recent_events = deque(maxlen=200)
+memory_recent_events_lock = threading.Lock()
 confirm_context = threading.local()
 PROJECTS_DIR = Path("history", "projects")
 CURRENT_PROJECT_PATH = Path("history", "current_project.txt")
@@ -146,12 +168,15 @@ def _list_projects():
 
 
 def _switch_project(name):
-    global current_project, current_chat_id, messages
+    global current_project, current_chat_id, current_extracted_upto, messages
     if name == current_project:
         return
     _save_current_chat()
+    _schedule_memory_extraction(
+        current_project, current_chat_id, messages, current_extracted_upto)
     messages = []
     current_chat_id = None
+    current_extracted_upto = 0
     save_history(messages)
     current_project = name
     _save_current_project()
@@ -200,6 +225,8 @@ def _read_chat(path):
         or not isinstance(chat.get("title"), str)
         or not isinstance(chat.get("updated"), str)
         or not isinstance(chat.get("messages"), list)
+        or type(chat.get("extracted_upto", 0)) is not int
+        or chat.get("extracted_upto", 0) < 0
     ):
         raise ValueError(f"Định dạng lịch sử chat không hợp lệ: {path.name}")
     return chat
@@ -252,6 +279,7 @@ def _save_current_chat():
         "title": first_user_message[:40],
         "updated": datetime.now().isoformat(timespec="microseconds"),
         "messages": messages,
+        "extracted_upto": current_extracted_upto,
     }
     temporary_path = path.with_suffix(".json.tmp")
     temporary_path.write_text(
@@ -280,6 +308,190 @@ def _find_saved_chat(messages):
     return max(chats, key=lambda item: (item[1]["updated"], item[0]))
 
 
+def _record_memory_event(action, text):
+    event = {
+        "id": uuid.uuid4().hex,
+        "action": action,
+        "text": text,
+        "timestamp": int(time.time() * 1000),
+    }
+    with memory_recent_events_lock:
+        memory_recent_events.append(event)
+
+
+def _mark_memory_upto_locked(project, chat_id, message_index):
+    global current_extracted_upto
+    if not isinstance(chat_id, str) or not CHAT_ID_PATTERN.fullmatch(chat_id):
+        memory_log("[memory] lỗi: mã chat không hợp lệ khi cập nhật extracted_upto")
+        return
+    path = _chat_dir(project) / f"{chat_id}.json"
+    if path.is_symlink() or not path.is_file():
+        memory_log(f"[memory] lỗi: không tìm thấy file chat {chat_id}")
+        return
+    chat = _read_chat(path)
+    persisted_upto = chat.get("extracted_upto", 0)
+    completed_key = (project, chat_id)
+    with memory_extraction_jobs_lock:
+        completed = memory_completed_messages.setdefault(completed_key, set())
+        if message_index > persisted_upto:
+            completed.add(message_index)
+        next_upto = persisted_upto
+        while next_upto + 1 in completed:
+            next_upto += 1
+            completed.remove(next_upto)
+        if not completed:
+            memory_completed_messages.pop(completed_key, None)
+    if next_upto == persisted_upto:
+        return
+    chat["extracted_upto"] = next_upto
+    temporary_path = path.with_suffix(".json.tmp")
+    temporary_path.write_text(
+        json.dumps(chat, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    temporary_path.replace(path)
+    if current_project == project and current_chat_id == chat_id:
+        current_extracted_upto = next_upto
+
+
+def _mark_memory_upto(project, chat_id, message_index):
+    with lock:
+        _mark_memory_upto_locked(project, chat_id, message_index)
+
+
+def extract_memories(project, chat_id, user_message, message_index, job_key):
+    try:
+        intent = memory_intent(user_message)
+        if not has_memory_hint(user_message):
+            memory_log("[memory] bỏ qua: không có dấu hiệu")
+            _mark_memory_upto(project, chat_id, message_index)
+            return
+        existing_memories = list_memories()
+        if intent == "forget":
+            prompt = build_deletion_prompt(user_message, existing_memories)
+            operation = "xóa"
+        else:
+            prompt = build_extraction_prompt(
+                [user_message],
+                existing_memories,
+                explicit=intent == "remember",
+            )
+            operation = "nhớ" if intent == "remember" else "trích xuất"
+        memory_log(
+            f"[memory] gọi model gemini-3.5-flash-lite để {operation}: "
+            f"{user_message[:240]!r}"
+        )
+        reply, model_key, meta = ask(
+            gemini_client,
+            openai_clients,
+            [],
+            prompt,
+            use_history=False,
+            route_text="trích xuất bộ nhớ",
+            model_override="gemini/gemini-3.5-flash-lite",
+            include_persistent_context=False,
+            allow_tools=False,
+        )
+        memory_log(f"[memory] model trả: {reply[:600]!r}")
+        with lock:
+            record_usage(usage, model_key, meta)
+        if intent == "forget":
+            delete_ids = parse_delete_ids(reply, existing_memories)
+            if delete_ids is None:
+                return
+            existing_by_id = {item["id"]: item for item in existing_memories}
+            deleted = []
+            for memory_id in delete_ids:
+                item = existing_by_id[memory_id]
+                if delete_memory(memory_id):
+                    deleted.append(item)
+                    _record_memory_event("forgot", item["text"])
+                else:
+                    memory_log(f"[memory] bỏ xóa: mục đã biến mất {memory_id}")
+            if deleted:
+                for item in deleted:
+                    memory_log(f"[memory] đã quên: {item['text']}")
+            else:
+                memory_log("[memory] không có mục phù hợp để quên")
+        else:
+            facts = validate_extracted_memories(
+                reply, [user_message], existing_memories)
+            if facts is None:
+                return
+            added, full = add_memories(facts)
+            for item in added:
+                _record_memory_event("remembered", item["text"])
+            memory_log(f"[memory] lưu {len(added)} mục")
+            if full:
+                memory_log("[memory] bộ nhớ đầy; từ chối các mục mới còn lại")
+            if not added and not full:
+                memory_log("[memory] bỏ qua: không có fact mới hợp lệ")
+        _mark_memory_upto(project, chat_id, message_index)
+    except Exception as error:
+        safe_error = str(error).encode("ascii", "backslashreplace").decode("ascii")
+        memory_log(f"[memory] lỗi: {safe_error}")
+    finally:
+        with memory_extraction_jobs_lock:
+            memory_extraction_jobs.discard(job_key)
+
+
+def _schedule_memory_message(project, chat_id, user_message, message_index):
+    if chat_id is None:
+        memory_log("[memory] bỏ qua: chưa có chat id")
+        return
+    if not has_memory_hint(user_message):
+        memory_log("[memory] bỏ qua: không có dấu hiệu")
+        _mark_memory_upto_locked(project, chat_id, message_index)
+        return
+    job_key = (project, chat_id, message_index)
+    with memory_extraction_jobs_lock:
+        completed_key = (project, chat_id)
+        if (
+            project == current_project
+            and chat_id == current_chat_id
+            and message_index <= current_extracted_upto
+        ) or message_index in memory_completed_messages.get(completed_key, set()):
+            memory_log(f"[memory] bỏ qua: tin nhắn {message_index} đã xử lý")
+            return
+        if job_key in memory_extraction_jobs:
+            memory_log(f"[memory] bỏ qua: tin nhắn {message_index} đang xử lý")
+            return
+        memory_extraction_jobs.add(job_key)
+    try:
+        threading.Thread(
+            target=extract_memories,
+            args=(project, chat_id, user_message, message_index, job_key),
+            daemon=True,
+        ).start()
+        memory_log(f"[memory] đã lên lịch tin nhắn {message_index}")
+    except Exception as error:
+        with memory_extraction_jobs_lock:
+            memory_extraction_jobs.discard(job_key)
+        safe_error = str(error).encode("ascii", "backslashreplace").decode("ascii")
+        memory_log(f"[memory] lỗi tạo thread: {safe_error}")
+
+
+def _schedule_memory_extraction(project, chat_id, chat_messages, extracted_upto):
+    if chat_id is None:
+        memory_log("[memory] bỏ qua chat rời: chưa có chat id")
+        return
+    user_messages = [
+        item["text"]
+        for item in chat_messages
+        if isinstance(item, dict)
+        and item.get("role") == "user"
+        and isinstance(item.get("text"), str)
+    ]
+    if type(extracted_upto) is not int or extracted_upto < 0:
+        memory_log("[memory] lỗi: extracted_upto không hợp lệ")
+        return
+    upto = min(extracted_upto, len(user_messages))
+    if upto >= len(user_messages):
+        memory_log("[memory] bỏ qua chat rời: không có tin nhắn mới")
+        return
+    for index, user_message in enumerate(user_messages[upto:], start=upto + 1):
+        _schedule_memory_message(project, chat_id, user_message, index)
+
+
 def make_clients():
     gemini_client = None
     if os.environ.get("GEMINI_API_KEY"):
@@ -303,11 +515,13 @@ _save_current_project()
 
 gemini_client, openai_clients = make_clients()
 current_chat_id = None
+current_extracted_upto = 0
 messages = load_history()
 if messages:
     saved_chat = _find_saved_chat(messages)
     if saved_chat is not None:
         current_chat_id = saved_chat[0]
+        current_extracted_upto = saved_chat[1].get("extracted_upto", 0)
     else:
         # Migrate the existing single-history chat without creating empty chats.
         _save_current_chat()
@@ -382,6 +596,7 @@ body.sidebar-collapsed #chat-sidebar{display:none}
 .project-controls{display:flex;gap:6px;margin-bottom:10px}
 #project-select{flex:1;min-width:0;padding:6px;border:1px solid #3a3d45;border-radius:6px;background:#24262b;color:#e8e8ea}
 #create-project{padding:6px 8px;font-size:.78rem;white-space:nowrap}
+#memory-open{width:100%;margin-top:10px}
 #chat{display:flex;flex:1 1 auto;flex-direction:column;min-width:0}
 #splitter{display:none;flex:0 0 6px;cursor:col-resize;background:#2e3036;z-index:2;touch-action:none;transition:background .12s,box-shadow .12s}
 body.panel-open #splitter{display:block}
@@ -405,6 +620,7 @@ body.panel-resizing #panel-frame{pointer-events:none}
 .pin-suggestion{display:flex;align-items:center;gap:8px;margin-top:8px}
 .pin-suggestion button{padding:4px 8px;font-size:.78rem;border-radius:6px}
 .pin-suggestion-status{color:#aeb4c0;font-size:.8rem}
+.memory-result{color:#8b8f99;font-size:.8rem;margin-top:6px}
 .export-list{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
 .export-list button{padding:6px 10px;font-size:.85rem}
 .export-list-status{color:#aeb4c0;font-size:.8rem;margin-top:8px}
@@ -431,7 +647,9 @@ textarea{flex:1;resize:none;height:56px;padding:12px;border-radius:10px;border:1
 <select id="project-select" aria-label="Project"></select>
 <button type="button" class="ghost" id="create-project">+ Project mới</button>
 </div>
-<b>Cuộc chat</b></div><div id="chat-list"></div></aside>
+<b>Cuộc chat</b>
+<button type="button" class="ghost" id="memory-open">🧠 Bộ nhớ</button>
+</div><div id="chat-list"></div></aside>
 <section id="chat">
 <div id="log"></div>
 <footer>
@@ -503,7 +721,7 @@ function openPanel(url, title){
 document.getElementById("close-panel").addEventListener("click", () => {
   document.body.classList.remove("panel-open");
 });
-const panelTitles = {"/bilingual":"Dịch song ngữ","/read":"Đọc tài liệu","/vis":"Trực quan hóa","/vis-play":"Giải thích động","/vis-view":"Sơ đồ giải thích","/diagram":"Sơ đồ"};
+const panelTitles = {"/bilingual":"Dịch song ngữ","/read":"Đọc tài liệu","/vis":"Trực quan hóa","/vis-play":"Giải thích động","/vis-view":"Sơ đồ giải thích","/diagram":"Sơ đồ","/memory":"Bộ nhớ"};
 log.addEventListener("click", event => {
   const link = event.target.closest("a");
   if (!link) return;
@@ -556,6 +774,29 @@ function addMsg(role, text, meta, imageUrl){
   log.appendChild(d);
   log.scrollTop = log.scrollHeight;
   return d;
+}
+async function pollMemoryRecent(since, botMessage){
+  const seen = new Set();
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (attempt > 0) await new Promise(resolve => setTimeout(resolve, 2000));
+    try {
+      const response = await fetch(`/memory/recent?since=${encodeURIComponent(since)}`);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Không kiểm tra được bộ nhớ");
+      for (const event of data.events || []) {
+        if (seen.has(event.id)) continue;
+        seen.add(event.id);
+        const note = document.createElement("div");
+        note.className = "memory-result";
+        const label = event.action === "remembered" ? "🧠 Đã nhớ: " : "🧠 Đã quên: ";
+        note.textContent = label + event.text;
+        botMessage.appendChild(note);
+      }
+      log.scrollTop = log.scrollHeight;
+    } catch (error) {
+      console.error("Không lấy được kết quả bộ nhớ:", error);
+    }
+  }
 }
 function addPinSuggestion(message, suggestion){
   const container = document.createElement("div");
@@ -789,6 +1030,7 @@ async function deleteSavedChat(chat){
 async function send(){
   const text = box.value.trim();
   if (!text) return;
+  const memorySince = Date.now();
   box.value = "";
   const imagePreview = pendingImagePreview;
   pendingImagePreview = null;
@@ -804,6 +1046,9 @@ async function send(){
     if (data.new) log.innerHTML = "";
     const reply = text === "/new" && data.new ? "" : data.reply || data.error || "(không có phản hồi)";
     const botMessage = reply ? addMsg("bot", reply, data.model || "") : null;
+    if (botMessage) {
+      pollMemoryRecent(memorySince, botMessage);
+    }
     if (data.exports && botMessage) addExportButtons(botMessage, data.exports);
     if (data.suggest_pin && botMessage) addPinSuggestion(botMessage, data.suggest_pin);
     if (reply.includes("/bilingual")) openPanel("/bilingual", "Dịch song ngữ");
@@ -851,6 +1096,9 @@ pdfFileInput.addEventListener("change", async () => {
 sendBtn.addEventListener("click", send);
 box.addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey){ e.preventDefault(); send(); } });
 document.getElementById("new").addEventListener("click", () => { box.value = "/new"; send(); });
+document.getElementById("memory-open").addEventListener(
+  "click", () => openPanel("/memory", "Bộ nhớ")
+);
 document.getElementById("toggle-sidebar").addEventListener("click", () => {
   document.body.classList.toggle("sidebar-collapsed");
 });
@@ -896,6 +1144,186 @@ box.focus();
 @app.get("/")
 def index():
     return PAGE
+
+
+MEMORY_PAGE = """<!DOCTYPE html>
+<html lang="vi"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bộ nhớ</title>
+<style>
+body{margin:0;padding:20px;background:#f4f5f7;color:#202124;font-family:system-ui,sans-serif}
+h1{font-size:1.25rem;margin:0 0 6px}
+.hint,.source,.created{color:#656b75;font-size:.82rem}
+#count{margin:12px 0;color:#555}
+.memory{background:#fff;border:1px solid #dfe2e7;border-radius:10px;padding:12px;margin:10px 0}
+.memory-text{white-space:pre-wrap;line-height:1.45}
+.source{margin-top:7px;overflow-wrap:anywhere}
+.created{margin-top:3px}
+.actions{display:flex;gap:7px;margin-top:9px}
+button{border:0;border-radius:7px;padding:7px 11px;background:#2563eb;color:#fff;cursor:pointer}
+button.secondary{background:#555d6b}
+form{display:flex;gap:8px;margin-top:16px}
+input{flex:1;min-width:0;padding:9px;border:1px solid #c9cdd4;border-radius:7px}
+#status{min-height:1.4em;margin-top:9px;color:#444;font-size:.88rem}
+</style></head><body>
+<h1>🧠 Bộ nhớ</h1>
+<div class="hint">Thông tin được ghi nhớ trên mọi project. Tối đa 40 mục.</div>
+<div id="count"></div>
+<div id="items"></div>
+<form id="add-form">
+  <input id="new-text" maxlength="119" placeholder="Thêm thông tin cần nhớ..." required>
+  <button type="submit">Thêm</button>
+</form>
+<div id="status" role="status"></div>
+<script>
+const MAX_ITEMS = __MAX_ITEMS__;
+const itemsBox = document.getElementById("items");
+const countBox = document.getElementById("count");
+const statusBox = document.getElementById("status");
+function render(items){
+  itemsBox.replaceChildren();
+  countBox.textContent = `${items.length}/${MAX_ITEMS} mục`;
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "hint";
+    empty.textContent = "Chưa có thông tin nào được ghi nhớ.";
+    itemsBox.appendChild(empty);
+  }
+  for (const item of items) {
+    const card = document.createElement("article");
+    card.className = "memory";
+    const text = document.createElement("div");
+    text.className = "memory-text";
+    text.textContent = item.text;
+    const source = document.createElement("div");
+    source.className = "source";
+    source.textContent = "Câu gốc: " + item.source;
+    const created = document.createElement("div");
+    created.className = "created";
+    created.textContent = "Ngày tạo: " + item.created.slice(0, 10);
+    const actions = document.createElement("div");
+    actions.className = "actions";
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "secondary";
+    edit.textContent = "Sửa";
+    edit.addEventListener("click", async () => {
+      const value = window.prompt("Sửa mục ghi nhớ:", item.text);
+      if (value === null) return;
+      await mutate(`/memory/edit/${encodeURIComponent(item.id)}`, {text:value});
+    });
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "secondary";
+    remove.textContent = "Xóa";
+    remove.addEventListener("click", async () => {
+      if (!window.confirm("Xóa mục ghi nhớ này?")) return;
+      await mutate(`/memory/delete/${encodeURIComponent(item.id)}`, {});
+    });
+    actions.append(edit, remove);
+    card.append(text, source, created, actions);
+    itemsBox.appendChild(card);
+  }
+}
+async function mutate(url, body){
+  statusBox.textContent = "Đang lưu...";
+  try {
+    const response = await fetch(url, {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(body)
+    });
+    const data = await response.json();
+    if (Array.isArray(data.memories)) render(data.memories);
+    if (!response.ok) throw new Error(data.error || "Không lưu được thay đổi");
+    statusBox.textContent = data.message || "Đã cập nhật bộ nhớ.";
+    return true;
+  } catch (error) {
+    statusBox.textContent = error.message;
+    return false;
+  }
+}
+document.getElementById("add-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const input = document.getElementById("new-text");
+  if (await mutate("/memory/add", {text:input.value})) input.value = "";
+});
+render(__MEMORIES__);
+</script></body></html>"""
+
+
+@app.get("/memory")
+def memory_panel():
+    memories = list_memories()
+    payload = json.dumps(memories, ensure_ascii=True).replace("</", "<\\/")
+    page = MEMORY_PAGE.replace("__MAX_ITEMS__", str(MAX_MEMORIES))
+    page = page.replace("__MEMORIES__", payload)
+    return app.response_class(page, mimetype="text/html")
+
+
+@app.get("/memory/recent")
+def memory_recent():
+    raw_since = request.args.get("since", "0")
+    try:
+        since = int(raw_since)
+    except ValueError:
+        return jsonify(error="Tham số since phải là timestamp milliseconds."), 400
+    with memory_recent_events_lock:
+        events = [
+            event for event in memory_recent_events
+            if event["timestamp"] >= since
+        ]
+    return jsonify(events=events)
+
+
+@app.post("/memory/add")
+def memory_add():
+    data = request.get_json(silent=True)
+    text = data.get("text") if isinstance(data, dict) else None
+    try:
+        item, reason = add_memory(text, "người dùng nhập tay")
+    except ValueError as error:
+        return jsonify(error=str(error)), 400
+    if reason:
+        message = (
+            "Bộ nhớ đã đủ 40 mục; hãy xóa một mục trước khi thêm."
+            if reason == "full"
+            else "Thông tin này đã có trong bộ nhớ."
+        )
+        return jsonify(error=message, memories=list_memories()), 409
+    _record_memory_event("remembered", item["text"])
+    return jsonify(message="Đã thêm vào bộ nhớ.", memories=list_memories()), 201
+
+
+@app.post("/memory/edit/<memory_id>")
+def memory_edit(memory_id):
+    data = request.get_json(silent=True)
+    text = data.get("text") if isinstance(data, dict) else None
+    try:
+        item, reason = edit_memory(memory_id, text)
+    except ValueError as error:
+        return jsonify(error=str(error)), 400
+    if reason:
+        message = (
+            "Không tìm thấy mục ghi nhớ."
+            if reason == "missing"
+            else "Thông tin này đã có trong bộ nhớ."
+        )
+        return jsonify(error=message, memories=list_memories()), 404 if reason == "missing" else 409
+    _record_memory_event("remembered", item["text"])
+    return jsonify(message="Đã sửa mục ghi nhớ.", memories=list_memories())
+
+
+@app.post("/memory/delete/<memory_id>")
+def memory_delete(memory_id):
+    item = next(
+        (entry for entry in list_memories() if entry["id"] == memory_id),
+        None,
+    )
+    if item is None or not delete_memory(memory_id):
+        return jsonify(error="Không tìm thấy mục ghi nhớ.", memories=list_memories()), 404
+    _record_memory_event("forgot", item["text"])
+    return jsonify(message="Đã xóa mục ghi nhớ.", memories=list_memories())
 
 
 @app.get("/bilingual")
@@ -1072,7 +1500,7 @@ def switch_project(name):
 
 @app.post("/chats/open/<chat_id>")
 def open_chat(chat_id):
-    global current_chat_id, messages
+    global current_chat_id, current_extracted_upto, messages
     path = _chat_path(chat_id)
     if path is None:
         return jsonify(error="Không tìm thấy cuộc chat."), 404
@@ -1080,9 +1508,13 @@ def open_chat(chat_id):
         if path.is_symlink() or not path.is_file():
             return jsonify(error="Không tìm thấy cuộc chat."), 404
         _save_current_chat()
+        if chat_id != current_chat_id:
+            _schedule_memory_extraction(
+                current_project, current_chat_id, messages, current_extracted_upto)
         chat_data = _read_chat(path)
         messages = chat_data["messages"]
         current_chat_id = chat_id
+        current_extracted_upto = chat_data.get("extracted_upto", 0)
         save_history(messages)
         opened_messages = messages[:]
     return jsonify(messages=opened_messages, current_id=chat_id)
@@ -1090,7 +1522,7 @@ def open_chat(chat_id):
 
 @app.post("/chats/delete/<chat_id>")
 def delete_chat(chat_id):
-    global current_chat_id, messages
+    global current_chat_id, current_extracted_upto, messages
     path = _chat_path(chat_id)
     if path is None:
         return jsonify(error="Không tìm thấy cuộc chat."), 404
@@ -1101,19 +1533,57 @@ def delete_chat(chat_id):
         deleted_current = current_chat_id == chat_id
         if deleted_current:
             current_chat_id = None
+            current_extracted_upto = 0
             messages = []
             save_history(messages)
     return jsonify(ok=True, current_deleted=deleted_current)
 
 
 def _process_chat_message(text):
-    global current_chat_id, messages
+    global current_chat_id, current_extracted_upto, messages
     if text == "/new":
         _save_current_chat()
+        _schedule_memory_extraction(
+            current_project, current_chat_id, messages, current_extracted_upto)
         messages = []
         current_chat_id = None
+        current_extracted_upto = 0
         save_history(messages)
         return {"reply": "Đã bắt đầu cuộc chat mới.", "model": "", "new": True}
+    if text == "/nho" or text.startswith("/nho "):
+        memory_text = text[4:].strip()
+        if not memory_text:
+            return {"reply": "Dùng: /nho nội dung cần ghi nhớ", "model": ""}
+        try:
+            _, reason = add_memory(memory_text, "người dùng nhập tay")
+        except ValueError as error:
+            return {"reply": str(error), "model": ""}
+        if reason == "full":
+            reply = "Bộ nhớ đã đủ 40 mục; hãy xóa một mục trước khi thêm."
+        elif reason == "duplicate":
+            reply = "Thông tin này đã có trong bộ nhớ."
+        else:
+            reply = "Đã ghi nhớ thông tin trên mọi project."
+            _record_memory_event("remembered", memory_text)
+        return {"reply": reply, "model": ""}
+    if text == "/bonho":
+        saved_memories = list_memories()
+        if not saved_memories:
+            return {"reply": "Chưa có mục nào trong bộ nhớ.", "model": ""}
+        lines = ["Bộ nhớ toàn cục:"]
+        for number, item in enumerate(saved_memories, 1):
+            lines.append(f"{number}. {item['text']}")
+            lines.append(f"   Câu gốc: {item['source']}")
+        return {"reply": "\n".join(lines), "model": ""}
+    if text == "/quen" or text.startswith("/quen "):
+        match = re.fullmatch(r"/quen\s+(\d+)", text)
+        if not match:
+            return {"reply": "Dùng: /quen số_thứ_tự", "model": ""}
+        deleted = delete_memory_by_number(int(match.group(1)))
+        if deleted is None:
+            return {"reply": "Không tìm thấy mục bộ nhớ theo số đó.", "model": ""}
+        _record_memory_event("forgot", deleted["text"])
+        return {"reply": f"Đã quên: {deleted['text']}", "model": ""}
     if text.startswith("/export"):
         try:
             json_path, _ = export_chat(messages, text[7:])
@@ -1149,6 +1619,7 @@ def _process_chat_message(text):
         if error:
             return {"reply": error, "model": ""}
         messages = imported_messages
+        current_extracted_upto = 0
         save_history(messages)
         return {
             "reply": f"Đã nạp {len(messages)} tin nhắn từ '{name}'.",
@@ -1305,6 +1776,7 @@ def _run_chat_job(job_id, text):
     confirm_context.job_id = job_id
     try:
         with lock:
+            messages_before = messages[:]
             workspace_before = _workspace_file_mtimes()
             try:
                 result = _process_chat_message(text)
@@ -1328,6 +1800,23 @@ def _run_chat_job(job_id, text):
             ):
                 result["reply"] += "\n\nMở sơ đồ: /diagram"
             _save_current_chat()
+            if (
+                not result.get("new")
+                and len(messages) == len(messages_before) + 2
+                and messages[:-2] == messages_before
+                and messages[-2].get("role") == "user"
+                and messages[-1].get("role") == "model"
+            ):
+                user_index = sum(
+                    1 for item in messages
+                    if isinstance(item, dict) and item.get("role") == "user"
+                )
+                _schedule_memory_message(
+                    current_project,
+                    current_chat_id,
+                    messages[-2]["text"],
+                    user_index,
+                )
     except Exception as e:
         result = {"reply": f"Lỗi xử lý: {e}", "model": ""}
     finally:
