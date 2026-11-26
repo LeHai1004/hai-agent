@@ -7,6 +7,7 @@ from google.genai import types
 from config import MODELS
 from tools import TOOLS
 import re
+import unicodedata
 from config import MODELS, LIMITS
 from usage import load_usage
 from pins import load_pins, pins_as_context
@@ -133,9 +134,32 @@ FOREIGN_CHAR_RE = re.compile(
     r"\u2DE0-\u2DFF\uA640-\uA69F\uA6A0-\uA6FF]"
 )
 
+VIETNAMESE_DIACRITIC_CHARS = frozenset(
+    "ăâđêôơư"
+    "àáảãạằắẳẵặầấẩẫậ"
+    "èéẻẽẹềếểễệ"
+    "ìíỉĩị"
+    "òóỏõọồốổỗộờớởỡợ"
+    "ùúủũụừứửữự"
+    "ỳýỷỹỵ"
+)
+
 
 def has_foreign_chars(text):
     return FOREIGN_CHAR_RE.search(text) is not None
+
+
+def is_vietnamese(text):
+    if not isinstance(text, str):
+        return False
+    letters = [
+        char.lower()
+        for char in unicodedata.normalize("NFC", text)
+        if char.isalpha()
+    ]
+    return bool(letters) and (
+        sum(char in VIETNAMESE_DIACRITIC_CHARS for char in letters) / len(letters) > 0.03
+    )
 
 
 def score_question(text):

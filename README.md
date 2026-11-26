@@ -5,7 +5,7 @@ Chatbot/agent chạy trong terminal, tự xây bằng Python. Không phụ thu�
 ## Điểm nổi bật
 
 - **Router nhiều model:** câu ngắn đi model nhẹ (tiết kiệm lượt), câu khó đi model mạnh, lỗi thì tự thử model kế tiếp.
-- **Tool calling:** tìm web, đọc 1 trang web, đọc/ghi file trong `workspace/` (ghi file luôn hỏi y/n), tạo file Word, đọc repo GitHub.
+- **Tool calling:** tìm web, đọc 1 trang web, đọc/ghi file trong workspace của project (ghi file luôn hỏi y/n), tạo file Word, đọc repo GitHub.
 - **Lệnh riêng:** dịch song ngữ `/en`, phân tích repo `/git`, giải thích trực quan có hoạt hình `/vis`.
 - **Lịch sử và lượt dùng:** lưu hội thoại, xem lượt dùng, export/import lịch sử.
 
@@ -16,7 +16,7 @@ Chatbot/agent chạy trong terminal, tự xây bằng Python. Không phụ thu�
 | `/new`            | Bắt đầu cuộc chat mới                                                                  |
 | `/usage`          | Xem lượt dùng các model                                                                |
 | `/web câu hỏi`    | Tìm web (DuckDuckGo) rồi trả lời kèm nguồn                                             |
-| `/en câu`         | Dịch Việt-Anh, kèm vài từ vựng chính                                                   |
+| `/en câu`         | Tự nhận diện chiều Việt-Anh/Anh-Việt, kèm vài từ vựng chính                            |
 | `/git owner/repo` | Git Coach: ai làm bao nhiêu commit, nhánh nào đang hoạt động, cách đọc một dòng commit |
 | `/vis nội dung`   | Giải thích quy trình/code bằng bức tranh toàn cảnh, sơ đồ Mermaid và hoạt hình         |
 | `exit`            | Thoát                                                                                  |
@@ -27,7 +27,7 @@ Chatbot/agent chạy trong terminal, tự xây bằng Python. Không phụ thu�
 /vis Khi bấm Run một chương trình Java thì code chạy từ RAM hay gửi request lên server rồi quay về?
 ```
 
-Bot trả đủ 4 phần: bức tranh toàn cảnh (cả những bước bạn chưa hỏi), sơ đồ Mermaid lưu ở `workspace/vis.md`, các bước đánh số ghi rõ dữ liệu đang nằm ở RAM, ổ đĩa hay mạng, và 3 câu nên hỏi tiếp. Đồng thời mở trang `workspace/vis.html` có nút Trước / Sau / Tự chạy để xem chấm sáng chạy giữa các thành phần.
+Bot trả đủ 4 phần: bức tranh toàn cảnh (cả những bước bạn chưa hỏi), sơ đồ Mermaid lưu trong workspace của project hiện tại, các bước đánh số ghi rõ dữ liệu đang nằm ở RAM, ổ đĩa hay mạng, và 3 câu nên hỏi tiếp. Đồng thời mở trang `vis.html` có nút Trước / Sau / Tự chạy để xem chấm sáng chạy giữa các thành phần.
 
 ## Cài đặt
 
@@ -70,7 +70,7 @@ translate.py   /en
 gitcoach.py    /git
 visual.py      /vis
 tools/         các tool bot được phép gọi
-workspace/     nơi bot ghi file
+workspace/     workspace của project mặc định; project khác dùng history/projects/<tên>/workspace/
 PROJECT.md     ghi chú trạng thái cho agent code
 ```
 
@@ -83,5 +83,5 @@ PROJECT.md     ghi chú trạng thái cho agent code
 ## Hướng phát triển
 
 - Chọn model theo loại câu hỏi tốt hơn.
-- Không gian "project" riêng cho từng chủ đề.
+- Mở rộng thêm các công cụ quản lý project.
 - Ghi chú "chưa xác nhận" khi tóm tắt nội dung web.

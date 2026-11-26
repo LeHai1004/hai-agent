@@ -13,7 +13,8 @@ from usage import format_usage, load_usage, record_usage
 from search import build_prompt, web_search
 from llm import ask
 from pins import load_pins, add_pin, remove_pin, format_pins
-from pdfread import read_pdf_page
+from project_workspace import get_workspace_dir
+from pdfread import parse_read_command, read_pdf_page
 from img import ask_image
 from filechat import ask_file
 
@@ -145,7 +146,7 @@ def main():
             except Exception as e:
                 print(f"Lỗi trực quan hóa: {e}\n")
                 continue
-            print(f"\n{reply}\n\n[Đã lưu sơ đồ vào workspace/vis.md]\n[{model_name}]\n")
+            print(f"\n{reply}\n\n[Đã lưu sơ đồ vào {(get_workspace_dir() / 'vis.md').as_posix()}]\n[{model_name}]\n")
             continue
 
         if text.startswith("/play "):
@@ -164,14 +165,11 @@ def main():
 
         if text.startswith("/read "):
             args = text[6:].strip()
-            page_no = 1
-            head, _, tail = args.rpartition(" ")
-            if head and tail.isdigit():
-                args, page_no = head.strip(), int(tail)
-            args = args.strip('"')
-            if not args:
+            read_command = parse_read_command(args)
+            if read_command is None:
                 print("Dùng: /read đường_dẫn.pdf [số trang]\n")
                 continue
+            args, page_no = read_command
             try:
                 msg, model_name = read_pdf_page(gemini_client, openai_clients, args, page_no)
             except Exception as e:

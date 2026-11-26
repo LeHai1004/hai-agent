@@ -1,11 +1,16 @@
 import mimetypes
 import os
 from llm import ask
+from project_workspace import resolve_workspace_path
 
 MAX_BYTES = 4 * 1024 * 1024  # ảnh lớn quá thì tốn token và dễ lỗi
 
 
 def load_image(path):
+    try:
+        path = str(resolve_workspace_path(path))
+    except ValueError as e:
+        return None, str(e)
     if not os.path.exists(path):
         return None, f"Không thấy file: {path}"
     mime = mimetypes.guess_type(path)[0] or ""

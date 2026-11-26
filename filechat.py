@@ -1,13 +1,18 @@
 import os
 from llm import ask
+from project_workspace import display_workspace_path, resolve_workspace_path
 
 MAX_CHARS = 24000  # khoảng 8 nghìn token; file dài hơn thì cắt bớt cho đỡ tốn lượt
 
 
 def read_text_file(path):
     # trả về ((nội dung, ghi chú), None) hoặc (None, thông báo lỗi)
+    try:
+        path = str(resolve_workspace_path(path))
+    except ValueError as e:
+        return None, str(e)
     if not os.path.isfile(path):
-        return None, f"Không thấy file: {path}"
+        return None, f"Không thấy file: {display_workspace_path(path)}"
     name = os.path.basename(path).lower()
     if name.startswith((".env", "id_rsa")) or name.endswith((".pem", ".key")):
         return None, "File này có thể chứa khóa bí mật, không gửi cho model."

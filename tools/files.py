@@ -1,12 +1,10 @@
 import os
-from pathlib import Path
 
-WORKSPACE_DIR = (Path.cwd() / "workspace").resolve()
-WORKSPACE_DIR.mkdir(exist_ok=True)
+from project_workspace import get_workspace_dir, resolve_workspace_path
 
 
 def _get_safe_path(path_str: str):
-    """Resolve path and verify it stays inside WORKSPACE_DIR."""
+    """Resolve path and verify it stays inside the active project workspace."""
     if not path_str or not path_str.strip():
         return None, "Lỗi: Đường dẫn không hợp lệ."
 
@@ -15,10 +13,7 @@ def _get_safe_path(path_str: str):
         return None, "Lỗi bảo mật: Không cho phép đường dẫn tuyệt đối, ổ đĩa hoặc '..' để truy cập ngoài workspace/."
 
     try:
-        target = (WORKSPACE_DIR / path_str).resolve()
-        if not target.is_relative_to(WORKSPACE_DIR):
-            return None, "Lỗi bảo mật: Đường dẫn nằm ngoài thư mục workspace/."
-        return target, None
+        return resolve_workspace_path(path_str, allow_absolute=False), None
     except Exception as e:
         return None, f"Lỗi xử lý đường dẫn: {e}"
 
@@ -26,12 +21,13 @@ def _get_safe_path(path_str: str):
 def list_files() -> str:
     """List all files and directories inside workspace/."""
     print("  [tool] list_files")
-    if not WORKSPACE_DIR.exists():
+    workspace_dir = get_workspace_dir()
+    if not workspace_dir.exists():
         return "Workspace directory is empty."
 
     items = []
-    for item in WORKSPACE_DIR.rglob("*"):
-        rel_path = item.relative_to(WORKSPACE_DIR)
+    for item in workspace_dir.rglob("*"):
+        rel_path = item.relative_to(workspace_dir)
         kind = "dir" if item.is_dir() else "file"
         items.append(f"- {rel_path} ({kind})")
 

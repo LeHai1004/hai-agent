@@ -1,17 +1,22 @@
 import json
-import os
 import webbrowser
-from pathlib import Path
-from llm import ask, has_foreign_chars
+from llm import ask, has_foreign_chars, is_vietnamese
+from project_workspace import get_workspace_dir
+
+FOREIGN_WARNING = "[có thể lẫn ký tự lạ]"
 
 
 def build_en_prompt(text):
+    detected_language = "tiếng Việt" if is_vietnamese(text) else "không phải tiếng Việt"
     return (
-        "Bạn là gia sư tiếng Anh. Nếu input là tiếng Việt thì dịch sang tiếng Anh, "
-        "nếu là tiếng Anh thì dịch sang tiếng Việt. Tách input thành 1 đến 6 câu.\n"
+        "Bạn là gia sư song ngữ Anh - Việt. Đoạn input được bộ nhận diện xếp là "
+        f"{detected_language}; nếu input có nhiều câu hoặc đoạn thì phân loại từng câu/đoạn riêng. "
+        "Nếu trên 3% chữ cái trong đoạn là ký tự có dấu tiếng Việt thì dịch sang tiếng Anh; "
+        "ngược lại dịch sang tiếng Việt. Tách input thành 1 đến 6 câu.\n"
+        "Trong mỗi cặp, original phải giữ nguyên văn bản gốc và translation là bản dịch.\n"
         "Chỉ viết bằng tiếng Việt và tiếng Anh. Tuyệt đối không dùng chữ Thái hay ký tự của ngôn ngữ khác.\n"
         "Chỉ trả về JSON hợp lệ, không có chữ nào ngoài JSON, không dùng khối ```. Dạng:\n"
-        '{"pairs":[{"en":"English sentence","vi":"câu tiếng Việt"}],'
+        '{"pairs":[{"original":"văn bản gốc","translation":"bản dịch"}],'
         '"vocab":[{"en":"word or phrase","vi":"nghĩa"}]}\n'
         "vocab: 3 đến 5 từ hoặc cụm quan trọng nhất. Không chắc nghĩa thì bỏ, không bịa.\n\n"
         f"Input: {text}"
@@ -39,7 +44,7 @@ def parse_translation(content):
                 out.append({k: it[k].strip() for k in keys})
         return out
 
-    pairs = clean(data.get("pairs"), ("en", "vi"))
+    pairs = clean(data.get("pairs"), ("original", "translation"))
     if not pairs:
         return None
     return {"pairs": pairs, "vocab": clean(data.get("vocab"), ("en", "vi"))}
@@ -55,9 +60,9 @@ body{margin:0;padding:24px;background:#f3f6fb;color:#172033;font-family:sans-ser
 h1{font-size:1.3rem}
 .row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
 .cell{padding:14px 16px;border-radius:10px;background:#fff;border:1px solid #d5deeb;line-height:1.5}
-.en{border-left:4px solid #2868bd;cursor:pointer}
-.en:hover{background:#eef4ff}
-.vi{border-left:4px solid #e0782b}
+.original{border-left:4px solid #2868bd;cursor:pointer}
+.original:hover{background:#eef4ff}
+.translation{border-left:4px solid #e0782b;cursor:pointer}
 .head{font-weight:700;color:#5b6b85;background:none;border:none;padding:0 4px}
 h2{font-size:1.05rem;margin-top:28px}
 .vocab{display:flex;flex-wrap:wrap;gap:8px}
@@ -66,31 +71,32 @@ h2{font-size:1.05rem;margin-top:28px}
 @media(max-width:640px){.row{grid-template-columns:1fr}}
 </style></head><body><div class="wrap">
 <h1>Dịch song ngữ Anh - Việt</h1>
-<p class="hint">Bấm vào câu tiếng Anh để nghe đọc.</p>
-<div class="row"><div class="cell head">English</div><div class="cell head">Tiếng Việt</div></div>
+<p class="hint">Bấm vào đoạn văn bản để nghe đọc.</p>
+<div class="row"><div class="cell head">Bản gốc</div><div class="cell head">Bản dịch</div></div>
 <div id="pairs"></div>
 <h2>Từ vựng</h2>
 <div id="vocab" class="vocab"></div>
 <script>
 const DATA = __DATA__;
-function speak(t){
+function speak(t, isVietnamese){
   speechSynthesis.cancel();
   const u = new SpeechSynthesisUtterance(t);
-  u.lang = "en-US";
+  u.lang = isVietnamese ? "vi-VN" : "en-US";
   speechSynthesis.speak(u);
 }
 const pairsBox = document.getElementById("pairs");
 DATA.pairs.forEach(p => {
   const row = document.createElement("div");
   row.className = "row";
-  const en = document.createElement("div");
-  en.className = "cell en";
-  en.textContent = p.en;
-  en.addEventListener("click", () => speak(p.en));
-  const vi = document.createElement("div");
-  vi.className = "cell vi";
-  vi.textContent = p.vi;
-  row.append(en, vi);
+  const original = document.createElement("div");
+  original.className = "cell original";
+  original.textContent = p.original;
+  original.addEventListener("click", () => speak(p.original, p.original_is_vietnamese));
+  const translation = document.createElement("div");
+  translation.className = "cell translation";
+  translation.textContent = p.translation;
+  translation.addEventListener("click", () => speak(p.translation, p.translation_is_vietnamese));
+  row.append(original, translation);
   pairsBox.appendChild(row);
 });
 const vocabBox = document.getElementById("vocab");
@@ -104,9 +110,26 @@ DATA.vocab.forEach(v => {
 
 
 def save_bilingual_html(data, open_browser=True):
-    os.makedirs("workspace", exist_ok=True)
-    payload = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
-    path = Path("workspace") / "bilingual.html"
+    workspace_dir = get_workspace_dir()
+
+    def speech_is_vietnamese(text):
+        if text.startswith(FOREIGN_WARNING):
+            text = text[len(FOREIGN_WARNING):].lstrip()
+        return is_vietnamese(text)
+
+    rendered = {
+        "pairs": [
+            {
+                **pair,
+                "original_is_vietnamese": is_vietnamese(pair["original"]),
+                "translation_is_vietnamese": speech_is_vietnamese(pair["translation"]),
+            }
+            for pair in data["pairs"]
+        ],
+        "vocab": data["vocab"],
+    }
+    payload = json.dumps(rendered, ensure_ascii=False).replace("</", "<\\/")
+    path = workspace_dir / "bilingual.html"
     path.write_text(PAGE.replace("__DATA__", payload), encoding="utf-8")
     if open_browser:
         webbrowser.open(path.resolve().as_uri())
@@ -129,18 +152,20 @@ def translate(gemini_client, openai_clients, text, open_browser=True):
     data = parse_translation(reply)
     if data is None:
         if warning:
-            reply = "[có thể lẫn ký tự lạ] " + reply
+            reply = FOREIGN_WARNING + " " + reply
         return reply, model_name, meta
     if warning:
-        data["pairs"][0]["vi"] = "[có thể lẫn ký tự lạ] " + data["pairs"][0]["vi"]
-    save_bilingual_html(data, open_browser=open_browser)
+        data["pairs"][0]["translation"] = (
+            FOREIGN_WARNING + " " + data["pairs"][0]["translation"]
+        )
+    output_path = save_bilingual_html(data, open_browser=open_browser)
     lines = []
     if warning:
-        lines.append("[có thể lẫn ký tự lạ]")
+        lines.append(FOREIGN_WARNING)
     for p in data["pairs"]:
-        lines.append(f"EN: {p['en']}")
-        lines.append(f"VI: {p['vi']}")
+        lines.append(f"Bản gốc: {p['original']}")
+        lines.append(f"Bản dịch: {p['translation']}")
     if data["vocab"]:
         lines.append("Từ vựng: " + "; ".join(f"{v['en']} = {v['vi']}" for v in data["vocab"]))
-    lines.append("(Đã mở workspace/bilingual.html)")
+    lines.append(f"(Đã mở {output_path})")
     return "\n".join(lines), model_name, meta

@@ -20,6 +20,7 @@ from pins import (
     remove_pin,
     save_pins,
 )
+from project_workspace import get_workspace_dir
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request, send_from_directory
 from transfer import EXPORT_DIR, export_chat, import_chat, list_exports
@@ -32,7 +33,7 @@ from history import load_history, save_history
 from llm import ask
 from filechat import ask_file
 from img import ask_image
-from pdfread import read_pdf_page
+from pdfread import parse_read_command, read_pdf_page
 from search import build_prompt, web_search
 from translate import translate
 from usage import format_usage, load_usage, record_usage
@@ -174,7 +175,7 @@ def looks_personal(text):
 
 
 def _workspace_file_mtimes():
-    workspace = Path("workspace")
+    workspace = get_workspace_dir()
     if not workspace.is_dir():
         return {}
     return {
@@ -899,27 +900,27 @@ def index():
 
 @app.get("/bilingual")
 def bilingual():
-    return send_from_directory("workspace", "bilingual.html")
+    return send_from_directory(str(get_workspace_dir()), "bilingual.html")
 
 
 @app.get("/pdfview/<int:page_no>")
 def pdf_view(page_no):
-    return send_from_directory("workspace", f"pdf_trang{page_no}.html")
+    return send_from_directory(str(get_workspace_dir()), f"pdf_trang{page_no}.html")
 
 
 @app.get("/vis-play")
 def vis_play():
-    return send_from_directory("workspace", "vis_play.html")
+    return send_from_directory(str(get_workspace_dir()), "vis_play.html")
 
 
 @app.get("/vis-view")
 def vis_view():
-    return send_from_directory("workspace", "vis.html")
+    return send_from_directory(str(get_workspace_dir()), "vis.html")
 
 
 @app.get("/diagram")
 def diagram():
-    diagram_path = Path("workspace", "diagram.md")
+    diagram_path = get_workspace_dir() / "diagram.md"
     diagram_text = ""
     if diagram_path.is_file() and not diagram_path.is_symlink():
         diagram_text = diagram_path.read_text(encoding="utf-8")
@@ -979,10 +980,10 @@ def download_workspace_file(filename):
         return "", 404
     if os.path.splitext(filename)[1].lower() not in DOWNLOADABLE_WORKSPACE_EXTENSIONS:
         return "", 404
-    target = Path("workspace", filename)
+    target = get_workspace_dir() / filename
     if target.is_symlink() or not target.is_file():
         return "", 404
-    return send_from_directory("workspace", filename, as_attachment=True)
+    return send_from_directory(str(get_workspace_dir()), filename, as_attachment=True)
 
 
 @app.post("/upload")
@@ -1009,8 +1010,8 @@ def upload():
         EXPORT_DIR.mkdir(exist_ok=True)
         (EXPORT_DIR / filename).write_bytes(content)
         return jsonify(path=filename, kind="json")
-    os.makedirs("workspace", exist_ok=True)
-    Path("workspace", filename).write_bytes(content)
+    workspace_dir = get_workspace_dir()
+    (workspace_dir / filename).write_bytes(content)
     kind = "pdf" if extension == ".pdf" else (
         "image" if extension in IMAGE_UPLOAD_EXTENSIONS else "text")
     return jsonify(path=f"workspace/{filename}", kind=kind)
@@ -1022,7 +1023,7 @@ def workspace_image(filename):
         return "", 404
     if os.path.splitext(filename)[1].lower() not in IMAGE_UPLOAD_EXTENSIONS:
         return "", 404
-    return send_from_directory("workspace", filename)
+    return send_from_directory(str(get_workspace_dir()), filename)
 
 
 @app.get("/api/history")
@@ -1174,7 +1175,7 @@ def _process_chat_message(text):
         except Exception as e:
             return {"reply": f"Lỗi dịch: {e}", "model": ""}
         reply = reply.replace(
-            "(Đã mở workspace/bilingual.html)",
+            f"(Đã mở {get_workspace_dir() / 'bilingual.html'})",
             "Đã dịch xong. Mở bản song ngữ: /bilingual",
         )
         return {"reply": reply, "model": model_key}
@@ -1212,19 +1213,16 @@ def _process_chat_message(text):
         }
     if text == "/read" or text.startswith("/read "):
         args = text[5:].strip()
-        page_no = 1
-        head, _, tail = args.rpartition(" ")
-        if head and tail.isdigit():
-            args, page_no = head.strip(), int(tail)
-        args = args.strip('"')
-        if not args:
+        read_command = parse_read_command(args)
+        if read_command is None:
             return {"reply": "Dùng: /read đường_dẫn.pdf [số trang]", "model": ""}
+        args, page_no = read_command
         try:
             reply, model_key = read_pdf_page(
                 gemini_client, openai_clients, args, page_no, open_browser=False)
         except Exception as e:
             return {"reply": f"Lỗi đọc PDF: {e}", "model": ""}
-        pdf_html_path = str(Path("workspace") / f"pdf_trang{page_no}.html")
+        pdf_html_path = f"workspace/pdf_trang{page_no}.html"
         reply = reply.replace(pdf_html_path, f"/pdfview/{page_no}")
         return {"reply": reply, "model": model_key}
     if text == "/img" or text.startswith("/img "):

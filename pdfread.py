@@ -1,22 +1,28 @@
 import json
 import os
 import webbrowser
-from pathlib import Path
 
 import pymupdf
-from llm import ask, has_foreign_chars
+from llm import ask, has_foreign_chars, is_vietnamese
+from project_workspace import (
+    display_workspace_path,
+    get_workspace_dir,
+    resolve_workspace_path,
+)
 
 CHUNK = 10  # số khối gửi dịch mỗi lần gọi model
 FOREIGN_WARNING = "[có thể lẫn ký tự lạ]"
 
 
 def extract_pages(path):
+    path = str(resolve_workspace_path(path))
     doc = pymupdf.open(path)
     return [page.get_text().strip() for page in doc]
 
 
 def page_blocks(path, page_no):
     # trả về (danh sách khối chữ của trang, tổng số trang); None nếu số trang sai
+    path = str(resolve_workspace_path(path))
     doc = pymupdf.open(path)
     total = len(doc)
     if not 1 <= page_no <= total:
@@ -42,22 +48,49 @@ def parse_vi(reply, n):
         data = json.loads(text[start:end + 1])
     except json.JSONDecodeError:
         return None
-    vi = data.get("vi") if isinstance(data, dict) else None
-    if isinstance(vi, list) and len(vi) == n and all(isinstance(x, str) for x in vi):
-        return vi
+    translations = data.get("translations", data.get("vi")) if isinstance(data, dict) else None
+    if (
+        isinstance(translations, list)
+        and len(translations) == n
+        and all(isinstance(x, str) for x in translations)
+    ):
+        return translations
     return None
+
+
+def parse_read_command(args):
+    tokens = args.strip().split()
+    pdf_end = next(
+        (i for i, token in enumerate(tokens) if token.strip("\"'").lower().endswith(".pdf")),
+        None,
+    )
+    if pdf_end is None:
+        return None
+    path = " ".join(tokens[:pdf_end + 1]).strip().strip("\"'")
+    if not path:
+        return None
+    page_no = 1
+    if pdf_end + 1 < len(tokens) and tokens[pdf_end + 1].isdigit():
+        page_no = int(tokens[pdf_end + 1])
+    return path, page_no
 
 
 def translate_blocks(gemini_client, openai_clients, blocks):
     result, model_name = [], ""
     for i in range(0, len(blocks), CHUNK):
         part = blocks[i:i + CHUNK]
-        numbered = "\n".join(f"[{n}] {t}" for n, t in enumerate(part, 1))
+        directions = [is_vietnamese(text) for text in part]
+        numbered = "\n".join(
+            f"[{n}] [{'Vietnamese -> English' if is_vietnamese else 'Other language -> Vietnamese'}] {text}"
+            for n, (text, is_vietnamese) in enumerate(zip(part, directions), 1)
+        )
         prompt = (
-            "Dịch từng đoạn tiếng Anh sau sang tiếng Việt, giữ đúng thứ tự và đúng số lượng đoạn. "
+            "Dịch từng đoạn theo chiều ghi ngay sau số thứ tự, giữ đúng thứ tự và số lượng. "
+            "Đoạn được nhận diện là tiếng Việt (trên 3% chữ cái có dấu tiếng Việt) thì dịch sang tiếng Anh; "
+            "các đoạn còn lại dịch sang tiếng Việt. "
             "Giữ nguyên tên riêng, từ viết tắt và thuật ngữ (5G, AI, ...). "
             "Chỉ viết bằng tiếng Việt và tiếng Anh. Tuyệt đối không dùng chữ Thái hay ký tự của ngôn ngữ khác. "
-            f"Chỉ trả về JSON hợp lệ, không dùng khối ```, dạng {{\"vi\": [...]}} gồm đúng {len(part)} chuỗi.\n\n"
+            f"Chỉ trả về JSON hợp lệ, không dùng khối ```, dạng {{\"translations\": [...]}} gồm đúng {len(part)} chuỗi.\n\n"
             + numbered
         )
         reply, model_name, _ = ask(gemini_client, openai_clients, [], prompt,
@@ -95,7 +128,8 @@ def save_cache(cache):
 
 def cache_key(path, page_no):
     # đổi file (dung lượng khác) thì cache cũ tự không khớp
-    return f"{os.path.basename(path)}|{os.path.getsize(path)}|{page_no}"
+    return f"v2|{os.path.basename(path)}|{os.path.getsize(path)}|{page_no}"
+
 
 PAGE = """<!DOCTYPE html>
 <html lang="vi"><head><meta charset="UTF-8">
@@ -108,37 +142,52 @@ h1{font-size:1.2rem}
 .hint{color:#5b6b85;font-size:.85rem}
 .row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px}
 .cell{padding:12px 14px;border-radius:10px;background:#fff;border:1px solid #d5deeb;line-height:1.5;font-size:.95rem}
-.en{border-left:4px solid #2868bd;cursor:pointer}
-.en:hover{background:#eef4ff}
-.vi{border-left:4px solid #e0782b}
+.original{border-left:4px solid #2868bd;cursor:pointer}
+.original:hover{background:#eef4ff}
+.translation{border-left:4px solid #e0782b;cursor:pointer}
 .head{font-weight:700;color:#5b6b85;background:none;border:none}
 @media(max-width:640px){.row{grid-template-columns:1fr}}
 </style></head><body><div class="wrap">
 <h1>__TITLE__</h1>
-<p class="hint">Bấm vào đoạn tiếng Anh để nghe đọc.</p>
-<div class="row"><div class="cell head">English</div><div class="cell head">Tiếng Việt</div></div>
+<p class="hint">Bấm vào đoạn văn bản để nghe đọc.</p>
+<div class="row"><div class="cell head">Bản gốc</div><div class="cell head">Bản dịch</div></div>
 <div id="rows"></div>
 <script>
 const DATA = __DATA__;
-function speak(t){speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(t);u.lang="en-US";speechSynthesis.speak(u);}
+function speak(t,isVietnamese){speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(t);u.lang=isVietnamese?"vi-VN":"en-US";speechSynthesis.speak(u);}
 const box = document.getElementById("rows");
 DATA.forEach(p => {
   const row = document.createElement("div"); row.className = "row";
-  const en = document.createElement("div"); en.className = "cell en"; en.textContent = p.en;
-  en.addEventListener("click", () => speak(p.en));
-  const vi = document.createElement("div"); vi.className = "cell vi"; vi.textContent = p.vi;
-  row.append(en, vi); box.appendChild(row);
+  const original = document.createElement("div"); original.className = "cell original"; original.textContent = p.original;
+  original.addEventListener("click", () => speak(p.original, p.original_is_vietnamese));
+  const translation = document.createElement("div"); translation.className = "cell translation"; translation.textContent = p.translation;
+  translation.addEventListener("click", () => speak(p.translation, p.translation_is_vietnamese));
+  row.append(original, translation); box.appendChild(row);
 });
 </script></div></body></html>"""
 
 
 def save_pdf_html(blocks, vi, page_no, total, name, open_browser=True):
-    os.makedirs("workspace", exist_ok=True)
-    pairs = [{"en": e, "vi": v} for e, v in zip(blocks, vi)]
+    workspace_dir = get_workspace_dir()
+
+    def speech_is_vietnamese(text):
+        if text.startswith(FOREIGN_WARNING):
+            text = text[len(FOREIGN_WARNING):].lstrip()
+        return is_vietnamese(text)
+
+    pairs = [
+        {
+            "original": original,
+            "translation": translation,
+            "original_is_vietnamese": is_vietnamese(original),
+            "translation_is_vietnamese": speech_is_vietnamese(translation),
+        }
+        for original, translation in zip(blocks, vi)
+    ]
     payload = json.dumps(pairs, ensure_ascii=False).replace("</", "<\\/")
-    title = f"{name} - trang {page_no}/{total}"
+    title = f"{name[:50]} - trang {page_no}/{total}"
     html = PAGE.replace("__TITLE__", title).replace("__DATA__", payload)
-    path = Path("workspace") / f"pdf_trang{page_no}.html"
+    path = workspace_dir / f"pdf_trang{page_no}.html"
     path.write_text(html, encoding="utf-8")
     if open_browser:
         webbrowser.open(path.resolve().as_uri())
@@ -146,8 +195,10 @@ def save_pdf_html(blocks, vi, page_no, total, name, open_browser=True):
 
 
 def read_pdf_page(gemini_client, openai_clients, path, page_no, open_browser=True):
+    path = str(resolve_workspace_path(path))
+    display_path = display_workspace_path(path)
     if not os.path.exists(path):
-        return f"Không thấy file: {path}", ""
+        return f"Không thấy file: {display_path}", ""
     blocks, total = page_blocks(path, page_no)
     if not blocks:
         return f"Trang {page_no} không có chữ (có thể là ảnh scan).", ""
@@ -175,7 +226,11 @@ def read_pdf_page(gemini_client, openai_clients, path, page_no, open_browser=Tru
     warning = any(v.startswith(FOREIGN_WARNING) for v in vi)
     out = save_pdf_html(
         blocks, vi, page_no, total, os.path.basename(path), open_browser=open_browser)
-    message = f"Đã dịch trang {page_no}/{total} ({len(blocks)} đoạn), mở {out}. Xem trang khác: /read {path} {page_no + 1}"
+    display_output = display_workspace_path(out)
+    message = (
+        f"Đã dịch trang {page_no}/{total} ({len(blocks)} đoạn), mở {display_output}. "
+        f"Xem trang khác: /read {display_path} {page_no + 1}"
+    )
     if warning:
         message = FOREIGN_WARNING + " " + message
     return message, model_name

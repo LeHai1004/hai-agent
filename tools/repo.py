@@ -3,6 +3,8 @@ import ast
 import sys
 from pathlib import Path
 
+from project_workspace import get_workspace_dir
+
 BO_QUA = {".venv", "__pycache__", ".git", "history", "exports", "workspace", "node_modules"}
 
 
@@ -80,7 +82,7 @@ def _id(ten: str) -> str:
 
 def draw_diagram(path: str = ".") -> str:
     """Draw a Mermaid diagram of which project file imports which file.
-    Saves it to workspace/diagram.md. Use path "." for the whole project."""
+    Saves it to the active project's workspace/diagram.md. Use path "." for the whole project."""
     print(f"  [tool] draw_diagram {path}")
     goc = Path(path).resolve()
     if not goc.is_dir():
@@ -155,10 +157,9 @@ def draw_diagram(path: str = ".") -> str:
         dong.append(f"    {_id(a)} --> {_id(b)}")
     code = "\n".join(dong)
 
-    out = Path("workspace")
-    out.mkdir(exist_ok=True)
-    (out / "diagram.md").write_text(f"```mermaid\n{code}\n```\n", encoding="utf-8")
-    return f"Đã lưu workspace/diagram.md. Mã Mermaid:\n{code}"
+    out = get_workspace_dir() / "diagram.md"
+    out.write_text(f"```mermaid\n{code}\n```\n", encoding="utf-8")
+    return f"Đã lưu {out.as_posix()}. Mã Mermaid:\n{code}"
 
 if __name__ == "__main__":
     print(scan_repo(sys.argv[1] if len(sys.argv) > 1 else "."))

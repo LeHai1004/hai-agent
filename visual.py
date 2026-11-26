@@ -1,8 +1,8 @@
 import json
-import os
 import webbrowser
 from pathlib import Path
 from llm import ask
+from project_workspace import get_workspace_dir
 
 
 def build_vis_prompt(text):
@@ -34,8 +34,7 @@ def build_vis_prompt(text):
 
 
 def save_workspace_vis(content):
-    os.makedirs("workspace", exist_ok=True)
-    path = os.path.join("workspace", "vis.md")
+    path = get_workspace_dir() / "vis.md"
     mermaid_code = ""
     if "```mermaid" in content:
         parts = content.split("```mermaid")
@@ -49,8 +48,7 @@ def save_workspace_vis(content):
 
 
 def save_workspace_html(content, open_browser=True):
-    os.makedirs("workspace", exist_ok=True)
-    html_path = os.path.join("workspace", "vis.html")
+    html_path = get_workspace_dir() / "vis.html"
 
     json_data = None
     try:
@@ -309,14 +307,14 @@ def save_scenes_html(scenes, open_browser=True):
     if not template.exists():
         print("Thiếu file vis_player.html")
         return None
-    os.makedirs("workspace", exist_ok=True)
+    workspace_dir = get_workspace_dir()
     data = json.dumps(scenes, ensure_ascii=False).replace("</", "<\\/")
     html = template.read_text(encoding="utf-8").replace(
         "<script>",
         "<script>window.SCENES_OVERRIDE = " + data + ";</script>\n<script>",
         1,
     )
-    path = Path("workspace") / "vis_play.html"
+    path = workspace_dir / "vis_play.html"
     path.write_text(html, encoding="utf-8")
     if open_browser:
         webbrowser.open(path.resolve().as_uri())
