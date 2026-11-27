@@ -393,7 +393,7 @@ def extract_memories(project, chat_id, user_message, message_index, job_key):
         )
         memory_log(f"[memory] model trả: {reply[:600]!r}")
         with lock:
-            record_usage(usage, model_key, meta)
+            record_usage(model_key, meta)
         if intent == "forget":
             delete_ids = parse_delete_ids(reply, existing_memories)
             if delete_ids is None:
@@ -1712,11 +1712,11 @@ def _process_chat_message(text):
             return {"reply": f"Lỗi đọc ảnh: {e}", "model": ""}
         if not model_key:
             return {"reply": reply, "model": ""}
-        record_usage(usage, model_key, meta)
+        record_usage(model_key, meta)
         return {
             "reply": reply,
             "model": model_key,
-            "usage": format_usage(usage, model_key),
+            "usage": format_usage(load_usage(), model_key),
         }
     if text == "/file" or text.startswith("/file "):
         rest = text[5:].strip()
@@ -1734,11 +1734,11 @@ def _process_chat_message(text):
             return {"reply": f"Lỗi đọc file: {e}", "model": ""}
         if not model_key:
             return {"reply": reply, "model": ""}
-        record_usage(usage, model_key, meta)
+        record_usage(model_key, meta)
         return {
             "reply": f"{reply}\n{note}",
             "model": model_key,
-            "usage": format_usage(usage, model_key),
+            "usage": format_usage(load_usage(), model_key),
         }
 
     question, prompt, sources = text, text, []
@@ -1764,8 +1764,12 @@ def _process_chat_message(text):
     messages.append({"role": "user", "text": question})
     messages.append({"role": "model", "text": saved})
     save_history(messages)
-    record_usage(usage, model_key, meta)
-    result = {"reply": saved, "model": model_key, "usage": format_usage(usage, model_key)}
+    record_usage(model_key, meta)
+    result = {
+        "reply": saved,
+        "model": model_key,
+        "usage": format_usage(load_usage(), model_key),
+    }
     if looks_personal(text):
         result["suggest_pin"] = text
     return result

@@ -1,15 +1,10 @@
-import json
 from config import HISTORY_FILE
+from storage import read_json, write_json
 
 
 def load_history():
-    if HISTORY_FILE.exists():
-        return json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
-    return []
+    return read_json(HISTORY_FILE, [])
 
 
 def save_history(messages):
-    HISTORY_FILE.parent.mkdir(exist_ok=True)
-    HISTORY_FILE.write_text(
-        json.dumps(messages, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    write_json(HISTORY_FILE, messages)

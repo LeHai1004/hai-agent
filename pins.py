@@ -1,6 +1,7 @@
-import json
 import os
 import re
+from json import JSONDecodeError
+from storage import read_json, update_json, write_json
 
 PROJECTS_DIR = os.path.join("history", "projects")
 CURRENT_PROJECT_PATH = os.path.join("history", "current_project.txt")
@@ -39,40 +40,54 @@ def _pins_path(project=None):
 
 def load_pins(project=None):
     path = _pins_path(project)
-    if not os.path.exists(path):
-        return []
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError):
+        data = read_json(path, [])
+    except (JSONDecodeError, OSError):
         return []
     return [p for p in data if isinstance(p, str)] if isinstance(data, list) else []
 
 
 def save_pins(pins, project=None):
     path = _pins_path(project)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(pins, f, ensure_ascii=False, indent=2)
+    write_json(path, pins)
 
 
 def add_pin(pins, note, project=None):
     note = note.strip()
     if not note:
         return "Dùng: /pin nội dung cần ghim"
-    if len(pins) >= MAX_PINS:
-        return f"Đã đủ {MAX_PINS} ghim, hãy /unpin số bớt một cái."
-    pins.append(note)
-    save_pins(pins, project)
-    return f"Đã ghim #{len(pins)}."
+    result = {}
+
+    def add_to_latest(latest):
+        current = [pin for pin in latest if isinstance(pin, str)] if isinstance(latest, list) else []
+        if len(current) >= MAX_PINS:
+            result["reply"] = f"Đã đủ {MAX_PINS} ghim, hãy /unpin số bớt một cái."
+            return current
+        current.append(note)
+        result["reply"] = f"Đã ghim #{len(current)}."
+        return current
+
+    pins[:] = update_json(_pins_path(project), [], add_to_latest)
+    return result["reply"]
 
 
 def remove_pin(pins, text, project=None):
-    if not text.strip().isdigit() or not 1 <= int(text) <= len(pins):
+    if not text.strip().isdigit():
         return "Dùng: /unpin số (xem số bằng /pins)"
-    removed = pins.pop(int(text) - 1)
-    save_pins(pins, project)
-    return f"Đã bỏ ghim: {removed}"
+    number = int(text)
+    result = {}
+
+    def remove_from_latest(latest):
+        current = [pin for pin in latest if isinstance(pin, str)] if isinstance(latest, list) else []
+        if not 1 <= number <= len(current):
+            result["reply"] = "Dùng: /unpin số (xem số bằng /pins)"
+            return current
+        removed = current.pop(number - 1)
+        result["reply"] = f"Đã bỏ ghim: {removed}"
+        return current
+
+    pins[:] = update_json(_pins_path(project), [], remove_from_latest)
+    return result["reply"]
 
 
 def format_pins(pins):

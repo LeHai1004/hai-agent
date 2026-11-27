@@ -1,30 +1,33 @@
-import json
 from datetime import date
 from config import LIMITS, USAGE_FILE
+from storage import read_json, update_json, write_json
 
 
 def load_usage():
     today = str(date.today())
-    if USAGE_FILE.exists():
-        data = json.loads(USAGE_FILE.read_text(encoding="utf-8"))
-        if data.get("date") == today:
-            return data
+    data = read_json(USAGE_FILE, {"date": today, "models": {}})
+    if data.get("date") == today:
+        return data
     return {"date": today, "models": {}}
 
 
 def save_usage(usage):
-    USAGE_FILE.parent.mkdir(exist_ok=True)
-    USAGE_FILE.write_text(
-        json.dumps(usage, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    write_json(USAGE_FILE, usage)
 
 
-def record_usage(usage, model, meta):
-    entry = usage["models"].setdefault(model, {"requests": 0, "tokens": 0})
-    entry["requests"] += 1
-    if meta and meta.total_token_count:
-        entry["tokens"] += meta.total_token_count
-    save_usage(usage)
+def record_usage(model, meta):
+    today = str(date.today())
+
+    def add_usage(usage):
+        if usage.get("date") != today:
+            usage.clear()
+            usage.update({"date": today, "models": {}})
+        entry = usage["models"].setdefault(model, {"requests": 0, "tokens": 0})
+        entry["requests"] += 1
+        if meta and meta.total_token_count:
+            entry["tokens"] += meta.total_token_count
+
+    update_json(USAGE_FILE, {"date": today, "models": {}}, add_usage)
 
 
 def format_usage(usage, provider_model):

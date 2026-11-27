@@ -56,8 +56,6 @@ def main():
         return
 
     messages = load_history()
-    pins = load_pins()
-    usage = load_usage()
     da_bao = False
 
     print(f"Chatbot. Đã nạp {len(messages)} tin nhắn cũ.")
@@ -69,12 +67,15 @@ def main():
         if text.lower() in ("exit", "quit"):
             break
         if text.startswith("/pin "):
+            pins = load_pins()
             print(add_pin(pins, text[5:]) + "\n")
             continue
         if text == "/pins":
+            pins = load_pins()
             print(format_pins(pins) + "\n")
             continue
         if text.startswith("/unpin"):
+            pins = load_pins()
             print(remove_pin(pins, text[6:].strip()) + "\n")
             continue
         if text == "/new":
@@ -84,6 +85,7 @@ def main():
             print("Đã bắt đầu cuộc chat mới.\n")
             continue
         if text == "/usage":
+            usage = load_usage()
             print(f"Lượt dùng ngày {usage['date']}:")
             for provider, model in MODELS:
                 pm = f"{provider}/{model}"
@@ -196,7 +198,8 @@ def main():
             if not model_name:
                 print(reply + "\n")
                 continue
-            record_usage(usage, model_name, meta)
+            record_usage(model_name, meta)
+            usage = load_usage()
             print(f"\nBot ({model_name}): {reply}\n")
             continue
 
@@ -218,7 +221,8 @@ def main():
             if not model_name:
                 print(reply + "\n")
                 continue
-            record_usage(usage, model_name, meta)
+            record_usage(model_name, meta)
+            usage = load_usage()
             print(f"\nBot ({model_name}): {reply}\n{note}\n")
             continue
 
@@ -253,7 +257,8 @@ def main():
                 )
             messages.append({"role": "model", "text": saved})
             save_history(messages)
-            record_usage(usage, model_key, meta)
+            record_usage(model_key, meta)
+            usage = load_usage()
             print(f"Bot ({model_key}): {answer}\n")
             if sources:
                 print("Nguồn:")

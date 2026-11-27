@@ -4,6 +4,7 @@ import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
+from storage import write_json
 
 MEMORY_PATH = Path("history", "memory", "global.json")
 MAX_MEMORIES = 40
@@ -89,13 +90,7 @@ def _load_unlocked():
 
 
 def _save_unlocked(memories):
-    MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = MEMORY_PATH.with_suffix(".json.tmp")
-    temporary_path.write_text(
-        json.dumps(memories, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    temporary_path.replace(MEMORY_PATH)
+    write_json(MEMORY_PATH, memories)
 
 
 def load_memories():
