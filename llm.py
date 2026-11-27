@@ -203,9 +203,9 @@ def available_models(text):
 
 def ask(gemini_client, openai_clients, messages, text, use_history=True, route_text=None, image=None,
         model_override=None, include_persistent_context=True, allow_tools=True,
-        project=None, memory_saved=None):
+        project=None, memory_saved=None, summary="", summary_upto=0):
     last_error = None
-    context = build_context(project, messages)
+    context = build_context(project, messages, summary, summary_upto)
     system_instruction = SYSTEM_INSTRUCTION
     system_extra = context["system_extra"] if include_persistent_context else ""
     if memory_saved is True:

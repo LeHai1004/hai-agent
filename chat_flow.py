@@ -1,11 +1,16 @@
+import json
 import re
+import threading
 
+from config import MAX_THREAD_MESSAGES, MEMORY_BACKGROUND_SCAN
 from memory import (
     build_deletion_prompt,
     delete_and_verify,
     list_memories,
     memory_intent,
     parse_delete_ids,
+    memory_log,
+    scan_recent_memories,
     save_and_verify,
 )
 
@@ -26,6 +31,8 @@ _DELETE_CLAIM_RE = re.compile(
     r"(?:xóa|xoá)\s+xong|đã\s+xóa\s+khỏi\s+bộ\s+nhớ)\b",
     re.IGNORECASE,
 )
+_SUMMARY_JOBS_LOCK = threading.Lock()
+_SUMMARY_JOBS = set()
 
 
 def _remember_text(text):
@@ -106,6 +113,8 @@ def run_chat_turn(
     record_usage_fn,
     use_history=True,
     project=None,
+    summary="",
+    summary_upto=0,
 ):
     intent = memory_intent(user_text)
     memory_result = None
@@ -133,6 +142,8 @@ def run_chat_turn(
         use_history=use_history,
         project=project,
         memory_saved=memory_saved,
+        summary=summary,
+        summary_upto=summary_upto,
     )
     if intent == "remember" and memory_saved is False and _SAVE_CLAIM_RE.search(answer or ""):
         error = memory_result["error"] or "Không xác minh được việc lưu."
@@ -140,3 +151,109 @@ def run_chat_turn(
     if intent == "forget" and _DELETE_CLAIM_RE.search(answer or ""):
         answer = "Mình sẽ không khẳng định đã xóa bộ nhớ trong câu trả lời."
     return answer, model_key, meta, memory_result
+
+
+def schedule_memory_scan(
+    gemini_client,
+    openai_clients,
+    messages,
+    ask_fn,
+    record_usage_fn,
+    on_saved=None,
+):
+    if not MEMORY_BACKGROUND_SCAN:
+        return None
+    user_turns = sum(
+        1
+        for item in messages
+        if isinstance(item, dict) and item.get("role") == "user"
+    )
+    if not user_turns or user_turns % 3:
+        return None
+    recent_messages = list(messages[-6:])
+    try:
+        worker = threading.Thread(
+            target=scan_recent_memories,
+            args=(
+                gemini_client,
+                openai_clients,
+                recent_messages,
+                ask_fn,
+                record_usage_fn,
+                on_saved,
+            ),
+            daemon=True,
+        )
+        worker.start()
+    except Exception as error:
+        memory_log(f"[memory] lỗi khởi chạy quét nền: {error}")
+        return None
+    return worker
+
+
+def schedule_thread_summary(
+    gemini_client,
+    openai_clients,
+    messages,
+    summary,
+    summary_upto,
+    ask_fn,
+    record_usage_fn,
+    persist_fn,
+    chat_key=None,
+):
+    if len(messages) <= MAX_THREAD_MESSAGES:
+        return None
+    target_upto = len(messages) - 8
+    if target_upto <= summary_upto:
+        return None
+    key = chat_key if chat_key is not None else "default"
+    with _SUMMARY_JOBS_LOCK:
+        if key in _SUMMARY_JOBS:
+            return None
+        _SUMMARY_JOBS.add(key)
+
+    old_messages = list(messages[summary_upto:target_upto])
+
+    def summarize():
+        try:
+            prompt = (
+                "Gộp phần tóm tắt cũ với các tin nhắn mới đã cũ. "
+                "Giữ các thông tin cần thiết cho hội thoại tiếp tục, không bịa, "
+                "không vượt quá khoảng 150 token. Chỉ trả phần tóm tắt.\n"
+                f"Tóm tắt cũ:\n{summary}\n"
+                "Các tin nhắn mới cần gộp:\n"
+                f"{json.dumps(old_messages, ensure_ascii=False)}"
+            )
+            text, model_key, meta = ask_fn(
+                gemini_client,
+                openai_clients,
+                [],
+                prompt,
+                use_history=False,
+                route_text="tóm tắt hội thoại",
+                model_override="gemini/gemini-3.5-flash-lite",
+                include_persistent_context=False,
+                allow_tools=False,
+            )
+            record_usage_fn(model_key, meta)
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError("Model trả về tóm tắt rỗng hoặc không phải văn bản.")
+            compact_summary = " ".join(text.split())[:450].rstrip()
+            persist_fn(compact_summary, target_upto)
+            memory_log(f"[memory] đã cập nhật tóm tắt chat đến tin {target_upto}")
+        except Exception as error:
+            memory_log(f"[memory] lỗi tóm tắt chat: {error}")
+        finally:
+            with _SUMMARY_JOBS_LOCK:
+                _SUMMARY_JOBS.discard(key)
+
+    try:
+        worker = threading.Thread(target=summarize, daemon=True)
+        worker.start()
+    except Exception as error:
+        with _SUMMARY_JOBS_LOCK:
+            _SUMMARY_JOBS.discard(key)
+        memory_log(f"[memory] lỗi khởi chạy tóm tắt chat: {error}")
+        return None
+    return worker

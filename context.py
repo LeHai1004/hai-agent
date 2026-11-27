@@ -29,14 +29,24 @@ def project_layer(project):
     return context[:_PROJECT_TOKEN_BUDGET * 3]
 
 
-def thread_layer(messages):
-    return list(messages[-MAX_THREAD_MESSAGES:])
+def thread_layer(messages, summary="", summary_upto=0):
+    if not summary:
+        return list(messages[-MAX_THREAD_MESSAGES:])
+    start = max(
+        len(messages) - MAX_THREAD_MESSAGES,
+        min(summary_upto, max(0, len(messages) - 8)),
+    )
+    summary_message = {
+        "role": "model",
+        "text": f"Tóm tắt các tin nhắn cũ:\n{summary}",
+    }
+    return [summary_message] + list(messages[start:])
 
 
-def build_context(project, messages):
+def build_context(project, messages, summary="", summary_upto=0):
     global_context = global_layer()
     project_context = project_layer(project)
-    thread_messages = thread_layer(messages)
+    thread_messages = thread_layer(messages, summary, summary_upto)
     system_extra = "\n\n".join(
         layer for layer in (global_context, project_context) if layer
     )

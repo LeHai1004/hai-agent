@@ -13,7 +13,11 @@ from pathlib import Path
 from urllib.parse import quote
 
 import tools
-from chat_flow import run_chat_turn
+from chat_flow import (
+    run_chat_turn,
+    schedule_memory_scan,
+    schedule_thread_summary,
+)
 from config import MEMORY_BACKGROUND_SCAN
 from pins import (
     add_pin,
@@ -32,7 +36,7 @@ from google.genai import types
 from openai import OpenAI
 from werkzeug.utils import secure_filename
 
-from history import load_history, save_history
+from history import load_history_state, save_history, update_history_summary
 from llm import ask
 from memory import (
     MAX_MEMORIES,
@@ -58,6 +62,7 @@ from search import build_prompt, web_search
 from translate import translate
 from usage import format_usage, load_usage, record_usage
 from visual import parse_scenes, play, visualize
+from storage import write_json
 
 load_dotenv()
 app = Flask(__name__)
@@ -171,16 +176,17 @@ def _list_projects():
 
 
 def _switch_project(name):
-    global current_project, current_chat_id, current_extracted_upto, messages
+    global current_project, current_chat_id, current_extracted_upto
+    global current_summary, current_summary_upto, messages
     if name == current_project:
         return
     _save_current_chat()
-    _schedule_memory_extraction(
-        current_project, current_chat_id, messages, current_extracted_upto)
     messages = []
     current_chat_id = None
     current_extracted_upto = 0
-    save_history(messages)
+    current_summary = ""
+    current_summary_upto = 0
+    save_history(messages, summary=current_summary, summary_upto=current_summary_upto)
     current_project = name
     _save_current_project()
 
@@ -230,6 +236,9 @@ def _read_chat(path):
         or not isinstance(chat.get("messages"), list)
         or type(chat.get("extracted_upto", 0)) is not int
         or chat.get("extracted_upto", 0) < 0
+        or not isinstance(chat.get("summary", ""), str)
+        or type(chat.get("summary_upto", 0)) is not int
+        or chat.get("summary_upto", 0) < 0
     ):
         raise ValueError(f"Định dạng lịch sử chat không hợp lệ: {path.name}")
     return chat
@@ -283,12 +292,30 @@ def _save_current_chat():
         "updated": datetime.now().isoformat(timespec="microseconds"),
         "messages": messages,
         "extracted_upto": current_extracted_upto,
+        "summary": current_summary,
+        "summary_upto": current_summary_upto,
     }
-    temporary_path = path.with_suffix(".json.tmp")
-    temporary_path.write_text(
-        json.dumps(chat, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    temporary_path.replace(path)
+    write_json(path, chat)
+
+
+def _save_chat_summary(project, chat_id, summary, summary_upto):
+    global current_summary, current_summary_upto
+    with lock:
+        path = _project_dir(project) / "chats" / f"{chat_id}.json"
+        if path.is_symlink() or not path.is_file():
+            memory_log(f"[memory] lỗi lưu tóm tắt: không tìm thấy chat {chat_id}")
+            return False
+        chat = _read_chat(path)
+        if summary_upto <= chat.get("summary_upto", 0):
+            return False
+        chat["summary"] = summary
+        chat["summary_upto"] = summary_upto
+        write_json(path, chat)
+        if current_project == project and current_chat_id == chat_id:
+            current_summary = summary
+            current_summary_upto = summary_upto
+            update_history_summary(summary, summary_upto)
+        return True
 
 
 def _find_saved_chat(messages):
@@ -523,12 +550,14 @@ _save_current_project()
 gemini_client, openai_clients = make_clients()
 current_chat_id = None
 current_extracted_upto = 0
-messages = load_history()
+messages, current_summary, current_summary_upto = load_history_state()
 if messages:
     saved_chat = _find_saved_chat(messages)
     if saved_chat is not None:
         current_chat_id = saved_chat[0]
         current_extracted_upto = saved_chat[1].get("extracted_upto", 0)
+        current_summary = saved_chat[1].get("summary", "")
+        current_summary_upto = saved_chat[1].get("summary_upto", 0)
     else:
         # Migrate the existing single-history chat without creating empty chats.
         _save_current_chat()
@@ -782,6 +811,28 @@ function addMsg(role, text, meta, imageUrl){
   log.scrollTop = log.scrollHeight;
   return d;
 }
+async function pollMemoryRecent(since, botMessage){
+  const seen = new Set();
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (attempt > 0) await new Promise(resolve => setTimeout(resolve, 2000));
+    try {
+      const response = await fetch(`/memory/recent?since=${encodeURIComponent(since)}`);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Không kiểm tra được bộ nhớ");
+      for (const event of data.events || []) {
+        if (event.action !== "scanned" || seen.has(event.id)) continue;
+        seen.add(event.id);
+        const note = document.createElement("div");
+        note.className = "memory-result";
+        note.textContent = "🧠 Đã cập nhật bộ nhớ: " + event.text;
+        botMessage.appendChild(note);
+      }
+      log.scrollTop = log.scrollHeight;
+    } catch (error) {
+      console.error("Không lấy được kết quả bộ nhớ:", error);
+    }
+  }
+}
 function addPinSuggestion(message, suggestion){
   const container = document.createElement("div");
   container.className = "pin-suggestion";
@@ -1014,6 +1065,7 @@ async function deleteSavedChat(chat){
 async function send(){
   const text = box.value.trim();
   if (!text) return;
+  const memorySince = Date.now();
   box.value = "";
   const imagePreview = pendingImagePreview;
   pendingImagePreview = null;
@@ -1030,6 +1082,7 @@ async function send(){
     const reply = text === "/new" && data.new ? "" : data.reply || data.error || "(không có phản hồi)";
     const botMessage = reply ? addMsg("bot", reply, data.model || "") : null;
     if (botMessage) {
+      pollMemoryRecent(memorySince, botMessage);
       const memoryResult = data.memory_result;
       if (memoryResult && memoryResult.intent === "remember" && memoryResult.saved) {
         const note = document.createElement("div");
@@ -1507,7 +1560,8 @@ def switch_project(name):
 
 @app.post("/chats/open/<chat_id>")
 def open_chat(chat_id):
-    global current_chat_id, current_extracted_upto, messages
+    global current_chat_id, current_extracted_upto
+    global current_summary, current_summary_upto, messages
     path = _chat_path(chat_id)
     if path is None:
         return jsonify(error="Không tìm thấy cuộc chat."), 404
@@ -1515,21 +1569,25 @@ def open_chat(chat_id):
         if path.is_symlink() or not path.is_file():
             return jsonify(error="Không tìm thấy cuộc chat."), 404
         _save_current_chat()
-        if chat_id != current_chat_id:
-            _schedule_memory_extraction(
-                current_project, current_chat_id, messages, current_extracted_upto)
         chat_data = _read_chat(path)
         messages = chat_data["messages"]
         current_chat_id = chat_id
         current_extracted_upto = chat_data.get("extracted_upto", 0)
-        save_history(messages)
+        current_summary = chat_data.get("summary", "")
+        current_summary_upto = chat_data.get("summary_upto", 0)
+        save_history(
+            messages,
+            summary=current_summary,
+            summary_upto=current_summary_upto,
+        )
         opened_messages = messages[:]
     return jsonify(messages=opened_messages, current_id=chat_id)
 
 
 @app.post("/chats/delete/<chat_id>")
 def delete_chat(chat_id):
-    global current_chat_id, current_extracted_upto, messages
+    global current_chat_id, current_extracted_upto
+    global current_summary, current_summary_upto, messages
     path = _chat_path(chat_id)
     if path is None:
         return jsonify(error="Không tìm thấy cuộc chat."), 404
@@ -1541,21 +1599,24 @@ def delete_chat(chat_id):
         if deleted_current:
             current_chat_id = None
             current_extracted_upto = 0
+            current_summary = ""
+            current_summary_upto = 0
             messages = []
-            save_history(messages)
+            save_history(messages, summary="", summary_upto=0)
     return jsonify(ok=True, current_deleted=deleted_current)
 
 
 def _process_chat_message(text):
-    global current_chat_id, current_extracted_upto, messages
+    global current_chat_id, current_extracted_upto
+    global current_summary, current_summary_upto, messages
     if text == "/new":
         _save_current_chat()
-        _schedule_memory_extraction(
-            current_project, current_chat_id, messages, current_extracted_upto)
         messages = []
         current_chat_id = None
         current_extracted_upto = 0
-        save_history(messages)
+        current_summary = ""
+        current_summary_upto = 0
+        save_history(messages, summary="", summary_upto=0)
         return {"reply": "Đã bắt đầu cuộc chat mới.", "model": "", "new": True}
     if text == "/nho" or text.startswith("/nho "):
         memory_text = text[4:].strip()
@@ -1647,7 +1708,9 @@ def _process_chat_message(text):
             return {"reply": error, "model": ""}
         messages = imported_messages
         current_extracted_upto = 0
-        save_history(messages)
+        current_summary = ""
+        current_summary_upto = 0
+        save_history(messages, summary="", summary_upto=0)
         return {
             "reply": f"Đã nạp {len(messages)} tin nhắn từ '{name}'.",
             "model": "",
@@ -1790,6 +1853,8 @@ def _process_chat_message(text):
             record_usage_fn=record_usage,
             use_history=not sources,
             project=current_project,
+            summary=current_summary,
+            summary_upto=current_summary_upto,
         )
     except Exception as e:
         return {"reply": f"Lỗi: tất cả model đều thất bại. {e}", "model": ""}
@@ -1855,15 +1920,35 @@ def _run_chat_job(job_id, text):
                 and messages[-2].get("role") == "user"
                 and messages[-1].get("role") == "model"
             ):
-                user_index = sum(
-                    1 for item in messages
-                    if isinstance(item, dict) and item.get("role") == "user"
+                project_snapshot = current_project
+                chat_id_snapshot = current_chat_id
+                schedule_memory_scan(
+                    gemini_client,
+                    openai_clients,
+                    messages,
+                    ask_fn=ask,
+                    record_usage_fn=record_usage,
+                    on_saved=lambda item: _record_memory_event("scanned", item),
                 )
-                _schedule_memory_message(
-                    current_project,
-                    current_chat_id,
-                    messages[-2]["text"],
-                    user_index,
+
+                def persist_summary(summary, summary_upto):
+                    _save_chat_summary(
+                        project_snapshot,
+                        chat_id_snapshot,
+                        summary,
+                        summary_upto,
+                    )
+
+                schedule_thread_summary(
+                    gemini_client,
+                    openai_clients,
+                    messages,
+                    current_summary,
+                    current_summary_upto,
+                    ask_fn=ask,
+                    record_usage_fn=record_usage,
+                    persist_fn=persist_summary,
+                    chat_key=(project_snapshot, chat_id_snapshot),
                 )
     except Exception as e:
         result = {"reply": f"Lỗi xử lý: {e}", "model": ""}

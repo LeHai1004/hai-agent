@@ -22,4 +22,4 @@ LIMITS = {
 HISTORY_FILE = Path("history") / "current.json"
 USAGE_FILE = Path("history") / "usage.json"
 MAX_THREAD_MESSAGES = 16
-MEMORY_BACKGROUND_SCAN = False
+MEMORY_BACKGROUND_SCAN = True

@@ -88,6 +88,9 @@ class MemoryChatPipelineTests(unittest.TestCase):
         import web
 
         cls.web = web
+        import chat_flow
+
+        cls.chat_flow = chat_flow
 
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -97,11 +100,14 @@ class MemoryChatPipelineTests(unittest.TestCase):
         self._patch("PROJECTS_DIR", root / "projects", self.web)
         self._patch("LEGACY_CHAT_DIR", root / "legacy-chats", self.web)
         self._patch("MEMORY_BACKGROUND_SCAN", True, self.web)
+        self._patch("MEMORY_BACKGROUND_SCAN", True, self.chat_flow)
 
         self.old_state = {
             "current_project": self.web.current_project,
             "current_chat_id": self.web.current_chat_id,
             "current_extracted_upto": self.web.current_extracted_upto,
+            "current_summary": self.web.current_summary,
+            "current_summary_upto": self.web.current_summary_upto,
             "messages": self.web.messages,
             "chat_jobs": self.web.chat_jobs,
             "active_job_id": self.web.active_job_id,
@@ -117,7 +123,14 @@ class MemoryChatPipelineTests(unittest.TestCase):
         self.web.current_project = "default"
         self.web.current_chat_id = None
         self.web.current_extracted_upto = 0
-        self.web.messages = []
+        self.web.messages = [
+            {"role": "user", "text": "trước đó 1"},
+            {"role": "model", "text": "trả lời 1"},
+            {"role": "user", "text": "trước đó 2"},
+            {"role": "model", "text": "trả lời 2"},
+        ]
+        self.web.current_summary = ""
+        self.web.current_summary_upto = 0
         self.web.chat_jobs = {}
         self.web.active_job_id = "memory-test-job"
         self.web.usage = {"models": {}}
@@ -135,6 +148,8 @@ class MemoryChatPipelineTests(unittest.TestCase):
             "current_project",
             "current_chat_id",
             "current_extracted_upto",
+            "current_summary",
+            "current_summary_upto",
             "messages",
             "chat_jobs",
             "active_job_id",
@@ -224,7 +239,7 @@ class MemoryChatPipelineTests(unittest.TestCase):
                 "source": "tôi dùng SQL Server",
             }]
         }, ensure_ascii=False)
-        with patch.object(self.web, "MEMORY_BACKGROUND_SCAN", False):
+        with patch.object(self.chat_flow, "MEMORY_BACKGROUND_SCAN", False):
             self._run_chat_turn(
                 "nhớ giúp tôi rằng tôi dùng SQL Server",
                 reply,

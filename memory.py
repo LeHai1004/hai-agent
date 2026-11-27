@@ -43,6 +43,11 @@ def _normalized(text):
     return " ".join(text.split()).casefold()
 
 
+def _memory_dedup_key(text):
+    without_punctuation = re.sub(r"[^\w\s]|_", " ", text.casefold())
+    return " ".join(without_punctuation.split())
+
+
 def _contains_long_alnum_run(text):
     run_length = 0
     for char in text:
@@ -103,8 +108,8 @@ def list_memories():
 
 
 def _is_duplicate(text, memories):
-    normalized_text = _normalized(text)
-    return any(_normalized(item["text"]) == normalized_text for item in memories)
+    normalized_text = _memory_dedup_key(text)
+    return any(_memory_dedup_key(item["text"]) == normalized_text for item in memories)
 
 
 def _new_memory(text, source):
@@ -134,10 +139,10 @@ def add_memory(text, source):
         return item, None
 
 
-def save_and_verify(text):
+def save_and_verify(text, source=None):
     memory_id = None
     try:
-        item, reason = add_memory(text, text)
+        item, reason = add_memory(text, text if source is None else source)
         if item is not None:
             memory_id = item["id"]
         memories = load_memories()
@@ -150,9 +155,13 @@ def save_and_verify(text):
                 "error": "Không tìm thấy mục vừa ghi trong file bộ nhớ.",
             }
         if reason == "duplicate":
-            normalized_text = _normalized(text)
+            normalized_text = _memory_dedup_key(text)
             existing = next(
-                (entry for entry in memories if _normalized(entry["text"]) == normalized_text),
+                (
+                    entry
+                    for entry in memories
+                    if _memory_dedup_key(entry["text"]) == normalized_text
+                ),
                 None,
             )
             if existing is not None:
@@ -246,6 +255,75 @@ def delete_and_verify(memory_id):
         return {"deleted": True, "id": memory_id, "error": None}
     except Exception as error:
         return {"deleted": False, "id": memory_id, "error": str(error)}
+
+
+def scan_recent_memories(
+    gemini_client,
+    openai_clients,
+    messages,
+    ask_fn,
+    record_usage_fn,
+    on_saved=None,
+):
+    try:
+        recent_messages = messages[-6:]
+        user_messages = [
+            item["text"]
+            for item in recent_messages
+            if isinstance(item, dict)
+            and item.get("role") == "user"
+            and isinstance(item.get("text"), str)
+        ]
+        if not user_messages:
+            return
+
+        existing_memories = load_memories()
+        prompt = (
+            "Chỉ trích xuất tối đa 3 thông tin bền vững về người dùng.\n"
+            + build_extraction_prompt(
+                user_messages,
+                existing_memories,
+                explicit=False,
+            )
+        )
+        reply, model_key, meta = ask_fn(
+            gemini_client,
+            openai_clients,
+            [],
+            prompt,
+            use_history=False,
+            route_text="trích xuất bộ nhớ dài hạn",
+            model_override="gemini/gemini-3.5-flash-lite",
+            include_persistent_context=False,
+            allow_tools=False,
+        )
+        record_usage_fn(model_key, meta)
+        facts = extract_memories(reply, user_messages, existing_memories)
+        if facts is None:
+            return
+
+        seen = {_memory_dedup_key(item["text"]) for item in existing_memories}
+        saved_count = 0
+        for fact in facts:
+            key = _memory_dedup_key(fact["text"])
+            if key in seen:
+                memory_log(f"[memory] bỏ fact trùng dấu câu: {fact['text'][:160]!r}")
+                continue
+            if saved_count >= 3:
+                break
+            seen.add(key)
+            result = save_and_verify(fact["text"], fact["source"])
+            if not result["saved"]:
+                memory_log(
+                    f"[memory] lỗi lưu fact đã quét: {result['error']}"
+                )
+                continue
+            saved_count += 1
+            if on_saved:
+                on_saved(fact["text"])
+        memory_log(f"[memory] quét nền đã lưu {saved_count} mục")
+    except Exception as error:
+        memory_log(f"[memory] lỗi quét nền: {error}")
 
 
 def delete_memory_by_number(number):

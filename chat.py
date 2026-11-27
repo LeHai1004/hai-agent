@@ -8,7 +8,7 @@ from gitcoach import git_coach
 from visual import visualize, play
 from translate import translate
 from config import MODELS
-from history import load_history, save_history
+from history import load_history_state, save_history, update_history_summary
 from usage import format_usage, load_usage, record_usage
 from search import build_prompt, web_search
 from llm import ask
@@ -17,7 +17,7 @@ from project_workspace import get_workspace_dir
 from pdfread import parse_read_command, read_pdf_page
 from img import ask_image
 from filechat import ask_file
-from chat_flow import run_chat_turn
+from chat_flow import run_chat_turn, schedule_memory_scan, schedule_thread_summary
 
 load_dotenv()
 
@@ -56,7 +56,8 @@ def main():
         print("Chưa có API key nào trong file .env (cần ít nhất GEMINI_API_KEY, GROQ_API_KEY hoặc OPENROUTER_API_KEY).")
         return
 
-    messages = load_history()
+    messages, summary, summary_upto = load_history_state()
+    summary_state = {"text": summary, "upto": summary_upto}
     da_bao = False
 
     print(f"Chatbot. Đã nạp {len(messages)} tin nhắn cũ.")
@@ -81,8 +82,9 @@ def main():
             continue
         if text == "/new":
             messages = []
+            summary_state.update({"text": "", "upto": 0})
             da_bao = False
-            save_history(messages)
+            save_history(messages, summary="", summary_upto=0)
             print("Đã bắt đầu cuộc chat mới.\n")
             continue
         if text == "/usage":
@@ -108,8 +110,9 @@ def main():
                 print(error + "\n")
                 continue
             messages = data
+            summary_state.update({"text": "", "upto": 0})
             da_bao = False
-            save_history(messages)
+            save_history(messages, summary="", summary_upto=0)
             print(f"Đã nạp {len(messages)} tin nhắn từ '{name}'.\n")
             continue
         question = text
@@ -258,6 +261,8 @@ def main():
                 ask_fn=ask,
                 record_usage_fn=record_usage,
                 use_history=not sources,
+                summary=summary_state["text"],
+                summary_upto=summary_state["upto"],
             )
             messages.append({"role": "user", "text": question})
             saved = answer
@@ -267,8 +272,38 @@ def main():
                 )
             messages.append({"role": "model", "text": saved})
             save_history(messages)
+            messages, summary, summary_upto = load_history_state()
+            summary_state.update({"text": summary, "upto": summary_upto})
             record_usage(model_key, meta)
             usage = load_usage()
+            schedule_memory_scan(
+                gemini_client,
+                openai_clients,
+                messages,
+                ask_fn=ask,
+                record_usage_fn=record_usage,
+                on_saved=lambda item: print(
+                    f"🧠 Đã cập nhật bộ nhớ: {item}", flush=True
+                ),
+            )
+
+            def persist_summary(updated_summary, updated_upto):
+                if update_history_summary(updated_summary, updated_upto):
+                    summary_state.update(
+                        {"text": updated_summary, "upto": updated_upto}
+                    )
+
+            schedule_thread_summary(
+                gemini_client,
+                openai_clients,
+                messages,
+                summary_state["text"],
+                summary_state["upto"],
+                ask_fn=ask,
+                record_usage_fn=record_usage,
+                persist_fn=persist_summary,
+                chat_key="terminal",
+            )
             print(f"Bot ({model_key}): {answer}\n")
             if memory_result:
                 if memory_result["intent"] == "remember":
