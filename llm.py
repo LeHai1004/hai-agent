@@ -10,8 +10,7 @@ import re
 import unicodedata
 from config import MODELS, LIMITS
 from usage import load_usage
-from pins import load_pins, pins_as_context
-from memory import build_memory_context, load_memories
+from context import build_context
 
 SYSTEM_INSTRUCTION = (
     "Trả lời bằng tiếng Việt, ngắn gọn. "
@@ -203,20 +202,13 @@ def available_models(text):
     return ok or ordered
 
 def ask(gemini_client, openai_clients, messages, text, use_history=True, route_text=None, image=None,
-        model_override=None, include_persistent_context=True, allow_tools=True):
+        model_override=None, include_persistent_context=True, allow_tools=True,
+        project=None):
     last_error = None
+    context = build_context(project, messages)
     system_instruction = SYSTEM_INSTRUCTION
-    if include_persistent_context:
-        pins_context = pins_as_context(load_pins())
-        if pins_context:
-            system_instruction += "\n\n" + pins_context
-        memory_context = build_memory_context(load_memories())
-        if memory_context:
-            system_instruction += (
-                "\n\n" + memory_context
-                + "\nChỉ dùng thông tin này khi liên quan câu hỏi; không nhắc lại nếu không cần "
-                "và không suy diễn thêm ngoài danh sách."
-            )
+    if include_persistent_context and context["system_extra"]:
+        system_instruction += "\n\n" + context["system_extra"]
 
     if model_override:
         models = [m for m in MODELS if f"{m[0]}/{m[1]}" == model_override]
@@ -229,7 +221,7 @@ def ask(gemini_client, openai_clients, messages, text, use_history=True, route_t
     for provider, model in models:
         try:
             if provider == "gemini":
-                history = to_contents(messages) if use_history else []
+                history = to_contents(context["messages"]) if use_history else []
                 config_options = {"system_instruction": system_instruction}
                 if allow_tools:
                     config_options["tools"] = TOOLS
@@ -244,7 +236,7 @@ def ask(gemini_client, openai_clients, messages, text, use_history=True, route_t
                 client = openai_clients.get(provider)
                 if not client:
                     continue
-                hist = messages if use_history else []
+                hist = context["messages"] if use_history else []
                 conv = to_openai_messages(hist, system_instruction)
                 conv.append({"role": "user", "content": text})
                 reply_text, total = run_openai(client, model, conv, allow_tools=allow_tools)

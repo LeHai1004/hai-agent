@@ -21,3 +21,4 @@ LIMITS = {
 
 HISTORY_FILE = Path("history") / "current.json"
 USAGE_FILE = Path("history") / "usage.json"
+MAX_THREAD_MESSAGES = 16

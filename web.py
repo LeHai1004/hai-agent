@@ -1754,7 +1754,13 @@ def _process_chat_message(text):
         sources = [(r.get("title", ""), r.get("href", "")) for r in results]
     try:
         answer, model_key, meta = ask(
-            gemini_client, openai_clients, messages, prompt, use_history=not sources)
+            gemini_client,
+            openai_clients,
+            messages,
+            prompt,
+            use_history=not sources,
+            project=current_project,
+        )
     except Exception as e:
         return {"reply": f"Lỗi: tất cả model đều thất bại. {e}", "model": ""}
     saved = answer
