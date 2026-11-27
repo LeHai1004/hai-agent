@@ -4,6 +4,7 @@ import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
+from config import MODELS
 from storage import write_json
 
 MEMORY_PATH = Path("history", "memory", "global.json")
@@ -31,12 +32,87 @@ _FORGET_INTENT_RE = re.compile(
 )
 
 
+class InvalidModelJSON(ValueError):
+    pass
+
+
 def memory_log(message):
     try:
         print(message, flush=True)
     except UnicodeEncodeError:
         escaped = message.encode("ascii", "backslashreplace").decode("ascii")
         print(escaped, flush=True)
+
+
+def parse_json_response(reply):
+    if not isinstance(reply, str):
+        raise InvalidModelJSON("Phản hồi model không phải văn bản.")
+    cleaned = re.sub(r"```(?:\s*json)?", "", reply, flags=re.IGNORECASE)
+    cleaned = cleaned.replace("```", "")
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start < 0 or end < start:
+        raise InvalidModelJSON("Không tìm thấy object JSON trong phản hồi.")
+    try:
+        return json.loads(cleaned[start:end + 1])
+    except json.JSONDecodeError as error:
+        raise InvalidModelJSON(str(error)) from error
+
+
+def _stronger_json_model(model_override):
+    candidates = [
+        f"{provider}/{model}"
+        for provider, model in MODELS
+        if provider == "gemini" and "lite" not in model.casefold()
+    ]
+    return next(
+        (candidate for candidate in candidates if candidate != model_override),
+        None,
+    )
+
+
+def request_json_model(
+    gemini_client,
+    openai_clients,
+    messages,
+    prompt,
+    ask_fn,
+    record_usage_fn,
+    route_text,
+    model_override="gemini/gemini-3.5-flash-lite",
+):
+    models = [model_override]
+    retry_model = _stronger_json_model(model_override)
+    if retry_model is not None and retry_model not in models:
+        models.append(retry_model)
+
+    for attempt, model in enumerate(models):
+        reply, model_key, meta = ask_fn(
+            gemini_client,
+            openai_clients,
+            messages,
+            prompt,
+            use_history=False,
+            route_text=route_text,
+            model_override=model,
+            include_persistent_context=False,
+            allow_tools=False,
+            response_mime_type="application/json",
+        )
+        record_usage_fn(model_key, meta)
+        try:
+            return parse_json_response(reply), model_key, meta
+        except InvalidModelJSON as error:
+            raw = reply if isinstance(reply, str) else str(reply)
+            memory_log(f"[memory] raw: {raw[:300]}")
+            if attempt + 1 < len(models):
+                memory_log(
+                    f"[memory] JSON không hợp lệ từ {model}; thử lại bằng {models[attempt + 1]}"
+                )
+                continue
+            raise InvalidModelJSON("Model trả JSON không hợp lệ.") from error
+
+    raise InvalidModelJSON("Model trả JSON không hợp lệ.")
 
 
 def _normalized(text):
@@ -286,19 +362,20 @@ def scan_recent_memories(
                 explicit=False,
             )
         )
-        reply, model_key, meta = ask_fn(
-            gemini_client,
-            openai_clients,
-            [],
-            prompt,
-            use_history=False,
-            route_text="trích xuất bộ nhớ dài hạn",
-            model_override="gemini/gemini-3.5-flash-lite",
-            include_persistent_context=False,
-            allow_tools=False,
-        )
-        record_usage_fn(model_key, meta)
-        facts = extract_memories(reply, user_messages, existing_memories)
+        try:
+            data, _, _ = request_json_model(
+                gemini_client,
+                openai_clients,
+                [],
+                prompt,
+                ask_fn,
+                record_usage_fn,
+                route_text="trích xuất bộ nhớ dài hạn",
+            )
+        except InvalidModelJSON:
+            memory_log("[memory] bỏ lượt: model trả JSON không hợp lệ")
+            return
+        facts = extract_memories(data, user_messages, existing_memories)
         if facts is None:
             return
 
@@ -398,14 +475,16 @@ def _original_source(candidate, user_messages):
 
 
 def extract_memories(reply, user_messages, existing_memories):
-    if not isinstance(reply, str):
-        memory_log("[memory] bỏ lượt: phản hồi model không phải văn bản")
-        return None
-    try:
-        data = json.loads(reply)
-    except json.JSONDecodeError:
-        memory_log("[memory] bỏ lượt: model trả JSON không hợp lệ")
-        return None
+    if isinstance(reply, dict):
+        data = reply
+    else:
+        try:
+            data = parse_json_response(reply)
+        except InvalidModelJSON:
+            raw = reply if isinstance(reply, str) else str(reply)
+            memory_log(f"[memory] raw: {raw[:300]}")
+            memory_log("[memory] bỏ lượt: model trả JSON không hợp lệ")
+            return None
     if not isinstance(data, dict) or not isinstance(data.get("facts"), list):
         memory_log("[memory] bỏ lượt: JSON không có danh sách facts hợp lệ")
         return None
@@ -500,14 +579,16 @@ def build_deletion_prompt(user_message, existing_memories):
 
 
 def parse_delete_ids(reply, existing_memories):
-    if not isinstance(reply, str):
-        memory_log("[memory] bỏ xóa: phản hồi model không phải văn bản")
-        return None
-    try:
-        data = json.loads(reply)
-    except json.JSONDecodeError:
-        memory_log("[memory] bỏ xóa: model trả JSON không hợp lệ")
-        return None
+    if isinstance(reply, dict):
+        data = reply
+    else:
+        try:
+            data = parse_json_response(reply)
+        except InvalidModelJSON:
+            raw = reply if isinstance(reply, str) else str(reply)
+            memory_log(f"[memory] raw: {raw[:300]}")
+            memory_log("[memory] bỏ xóa: model trả JSON không hợp lệ")
+            return None
     if not isinstance(data, dict) or not isinstance(data.get("delete_ids"), list):
         memory_log("[memory] bỏ xóa: JSON không có danh sách delete_ids hợp lệ")
         return None

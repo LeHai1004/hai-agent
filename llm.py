@@ -203,15 +203,23 @@ def available_models(text):
 
 def ask(gemini_client, openai_clients, messages, text, use_history=True, route_text=None, image=None,
         model_override=None, include_persistent_context=True, allow_tools=True,
-        project=None, memory_saved=None, summary="", summary_upto=0):
+        project=None, memory_saved=None, summary="", summary_upto=0,
+        memory_intent=None, memory_forget_failed=False, response_mime_type=None):
     last_error = None
     context = build_context(project, messages, summary, summary_upto)
     system_instruction = SYSTEM_INSTRUCTION
     system_extra = context["system_extra"] if include_persistent_context else ""
     if memory_saved is True:
         system_extra += "\nHệ thống đã lưu thông tin này, hãy xác nhận ngắn gọn"
+    elif memory_intent == "ordinary" and memory_saved is not True:
+        system_extra += (
+            "\nKhông được nói đã ghi nhận/đã lưu/đã nhớ/đã quên; "
+            "hệ thống tự hiển thị 🧠 khi thật sự lưu."
+        )
     elif memory_saved is False:
         system_extra += "\nLưu thất bại, hãy nói thật là chưa lưu được"
+    if memory_intent == "forget" and memory_forget_failed:
+        system_extra += "\nViệc xóa chưa thực hiện được, hãy nói thật là chưa xóa."
     if system_extra:
         system_instruction += "\n\n" + system_extra
 
@@ -228,6 +236,8 @@ def ask(gemini_client, openai_clients, messages, text, use_history=True, route_t
             if provider == "gemini":
                 history = to_contents(context["messages"]) if use_history else []
                 config_options = {"system_instruction": system_instruction}
+                if response_mime_type:
+                    config_options["response_mime_type"] = response_mime_type
                 if allow_tools:
                     config_options["tools"] = TOOLS
                 config = types.GenerateContentConfig(**config_options)

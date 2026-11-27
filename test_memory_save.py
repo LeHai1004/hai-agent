@@ -9,6 +9,67 @@ import memory
 
 
 class SaveAndVerifyTests(unittest.TestCase):
+    def test_chat_context_forbids_unverified_claims_and_reports_failed_forget(self):
+        conversations = []
+
+        def fake_openai(client, model, conversation, **kwargs):
+            conversations.append(conversation)
+            return "Trả lời.", 0
+
+        with (
+            patch.object(
+                llm,
+                "available_models",
+                return_value=[("groq", "qwen/qwen3.8-27b")],
+            ),
+            patch.object(llm, "run_openai", side_effect=fake_openai),
+        ):
+            for intent, forget_failed in (("ordinary", False), ("forget", True)):
+                llm.ask(
+                    None,
+                    {"groq": object()},
+                    [],
+                    "Câu hỏi",
+                    include_persistent_context=False,
+                    allow_tools=False,
+                    memory_intent=intent,
+                    memory_forget_failed=forget_failed,
+                )
+
+        ordinary_system = conversations[0][0]["content"]
+        forget_system = conversations[1][0]["content"]
+        self.assertIn(
+            "Không được nói đã ghi nhận/đã lưu/đã nhớ/đã quên; "
+            "hệ thống tự hiển thị 🧠 khi thật sự lưu.",
+            ordinary_system,
+        )
+        self.assertIn(
+            "Việc xóa chưa thực hiện được, hãy nói thật là chưa xóa.",
+            forget_system,
+        )
+
+    def test_remember_prefix_and_leading_colon_are_removed_before_saving(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "global.json"
+            with patch.object(memory, "MEMORY_PATH", path):
+                result = chat_flow.run_chat_turn(
+                    None,
+                    {},
+                    [],
+                    "nhớ giúp tôi: tôi dùng SQL Server",
+                    "nhớ giúp tôi: tôi dùng SQL Server",
+                    ask_fn=lambda *args, **kwargs: (
+                        "Được.",
+                        "gemini/gemini-3.5-flash",
+                        {},
+                    ),
+                    record_usage_fn=lambda model, meta: None,
+                )
+                saved = memory.load_memories()
+
+        self.assertTrue(result[3]["saved"])
+        self.assertEqual(saved[0]["text"], "tôi dùng SQL Server")
+
     def test_remember_request_saves_and_reads_back_memory(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "global.json"

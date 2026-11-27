@@ -3,13 +3,92 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+import llm
 import memory
 from memory import build_memory_context, extract_memories
 
 
 class MemoryExtractionTests(unittest.TestCase):
+    def test_parse_json_response_strips_json_code_fence(self):
+        parsed = memory.parse_json_response('```json\n{"facts": []}\n```')
+        self.assertEqual(parsed, {"facts": []})
+
+    def test_parse_json_response_extracts_object_from_surrounding_text(self):
+        parsed = memory.parse_json_response(
+            'Kết quả: {"delete_ids":["abc"]} hoàn tất.'
+        )
+        self.assertEqual(parsed, {"delete_ids": ["abc"]})
+
+    def test_json_model_retries_with_stronger_gemini_model_and_json_mode(self):
+        replies = iter(["không phải JSON", '{"facts": []}'])
+        calls = []
+        usages = []
+
+        def fake_ask(*args, **kwargs):
+            calls.append(kwargs)
+            reply = next(replies)
+            return reply, kwargs["model_override"], {}
+
+        with patch.object(memory, "memory_log") as log:
+            data, model_key, _ = memory.request_json_model(
+                None,
+                {},
+                [],
+                "prompt",
+                fake_ask,
+                lambda model, meta: usages.append(model),
+                route_text="memory test",
+            )
+
+        self.assertEqual(data, {"facts": []})
+        self.assertEqual(model_key, "gemini/gemini-3.5-flash")
+        self.assertEqual(
+            [call["model_override"] for call in calls],
+            ["gemini/gemini-3.5-flash-lite", "gemini/gemini-3.5-flash"],
+        )
+        self.assertTrue(all(
+            call["response_mime_type"] == "application/json" for call in calls
+        ))
+        self.assertEqual(usages, [
+            "gemini/gemini-3.5-flash-lite",
+            "gemini/gemini-3.5-flash",
+        ])
+        log.assert_any_call("[memory] raw: không phải JSON")
+
+    def test_ask_sets_gemini_json_response_mode(self):
+        gemini = SimpleNamespace(
+            chats=SimpleNamespace(
+                create=lambda **kwargs: SimpleNamespace(
+                    send_message=lambda message: SimpleNamespace(
+                        text='{"facts":[]}',
+                        usage_metadata=None,
+                    )
+                )
+            )
+        )
+        with patch.object(
+            llm.types,
+            "GenerateContentConfig",
+            side_effect=lambda **options: options,
+        ) as generate_config:
+            llm.ask(
+                gemini,
+                {},
+                [],
+                "prompt",
+                model_override="gemini/gemini-3.5-flash-lite",
+                include_persistent_context=False,
+                response_mime_type="application/json",
+            )
+
+        self.assertEqual(
+            generate_config.call_args.kwargs["response_mime_type"],
+            "application/json",
+        )
+
     def test_discards_source_that_does_not_match_user_text(self):
         reply = json.dumps({
             "facts": [{

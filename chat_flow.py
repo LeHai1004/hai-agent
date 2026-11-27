@@ -4,12 +4,14 @@ import threading
 
 from config import MAX_THREAD_MESSAGES, MEMORY_BACKGROUND_SCAN
 from memory import (
+    InvalidModelJSON,
     build_deletion_prompt,
     delete_and_verify,
     list_memories,
     memory_intent,
     parse_delete_ids,
     memory_log,
+    request_json_model,
     scan_recent_memories,
     save_and_verify,
 )
@@ -36,7 +38,8 @@ _SUMMARY_JOBS = set()
 
 
 def _remember_text(text):
-    return _REMEMBER_PREFIX_RE.sub("", text, count=1).strip()
+    text = _REMEMBER_PREFIX_RE.sub("", text, count=1)
+    return re.sub(r"^[\s:,\-–—]+", "", text).strip()
 
 
 def _forget_request(
@@ -54,18 +57,22 @@ def _forget_request(
             "error": "Không có mục bộ nhớ để xóa.",
         }
     try:
-        reply, model_key, meta = ask_fn(
+        data, _, _ = request_json_model(
             gemini_client,
             openai_clients,
             [],
             build_deletion_prompt(text, existing),
-            use_history=False,
+            ask_fn,
+            record_usage_fn,
             route_text="chọn mục bộ nhớ cần xóa",
-            model_override="gemini/gemini-3.5-flash-lite",
-            include_persistent_context=False,
-            allow_tools=False,
         )
-        record_usage_fn(model_key, meta)
+    except InvalidModelJSON:
+        memory_log("[memory] bỏ xóa: model trả JSON không hợp lệ")
+        return {
+            "intent": "forget",
+            "deleted": [],
+            "error": "Không đọc được lựa chọn xóa từ model.",
+        }
     except Exception as error:
         return {
             "intent": "forget",
@@ -73,7 +80,7 @@ def _forget_request(
             "error": f"Không thể xác định mục cần xóa: {error}",
         }
 
-    delete_ids = parse_delete_ids(reply, existing)
+    delete_ids = parse_delete_ids(data, existing)
     if delete_ids is None:
         return {
             "intent": "forget",
@@ -144,6 +151,10 @@ def run_chat_turn(
         memory_saved=memory_saved,
         summary=summary,
         summary_upto=summary_upto,
+        memory_intent=intent or "ordinary",
+        memory_forget_failed=bool(
+            intent == "forget" and memory_result and memory_result.get("error")
+        ),
     )
     if intent == "remember" and memory_saved is False and _SAVE_CLAIM_RE.search(answer or ""):
         error = memory_result["error"] or "Không xác minh được việc lưu."

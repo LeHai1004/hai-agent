@@ -39,6 +39,7 @@ from werkzeug.utils import secure_filename
 from history import load_history_state, save_history, update_history_summary
 from llm import ask
 from memory import (
+    InvalidModelJSON,
     MAX_MEMORIES,
     add_memory,
     add_memories,
@@ -52,6 +53,7 @@ from memory import (
     memory_intent,
     memory_log,
     parse_delete_ids,
+    request_json_model,
     save_and_verify,
     delete_and_verify,
 )
@@ -410,20 +412,35 @@ def extract_memories(project, chat_id, user_message, message_index, job_key):
             f"[memory] gọi model gemini-3.5-flash-lite để {operation}: "
             f"{user_message[:240]!r}"
         )
-        reply, model_key, meta = ask(
-            gemini_client,
-            openai_clients,
-            [],
-            prompt,
-            use_history=False,
-            route_text="trích xuất bộ nhớ",
-            model_override="gemini/gemini-3.5-flash-lite",
-            include_persistent_context=False,
-            allow_tools=False,
-        )
-        memory_log(f"[memory] model trả: {reply[:600]!r}")
-        with lock:
-            record_usage(model_key, meta)
+        if intent == "forget":
+            def record_usage_safely(model_key, meta):
+                with lock:
+                    record_usage(model_key, meta)
+
+            reply, model_key, meta = request_json_model(
+                gemini_client,
+                openai_clients,
+                [],
+                prompt,
+                ask,
+                record_usage_safely,
+                route_text="chọn mục bộ nhớ cần xóa",
+            )
+        else:
+            reply, model_key, meta = ask(
+                gemini_client,
+                openai_clients,
+                [],
+                prompt,
+                use_history=False,
+                route_text="trích xuất bộ nhớ",
+                model_override="gemini/gemini-3.5-flash-lite",
+                include_persistent_context=False,
+                allow_tools=False,
+            )
+            with lock:
+                record_usage(model_key, meta)
+        memory_log(f"[memory] model trả: {str(reply)[:600]!r}")
         if intent == "forget":
             delete_ids = parse_delete_ids(reply, existing_memories)
             if delete_ids is None:
@@ -456,6 +473,8 @@ def extract_memories(project, chat_id, user_message, message_index, job_key):
             if not added and not full:
                 memory_log("[memory] bỏ qua: không có fact mới hợp lệ")
         _mark_memory_upto(project, chat_id, message_index)
+    except InvalidModelJSON:
+        memory_log("[memory] bỏ xóa: model trả JSON không hợp lệ")
     except Exception as error:
         safe_error = str(error).encode("ascii", "backslashreplace").decode("ascii")
         memory_log(f"[memory] lỗi: {safe_error}")
