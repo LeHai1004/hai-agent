@@ -17,6 +17,7 @@ from project_workspace import get_workspace_dir
 from pdfread import parse_read_command, read_pdf_page
 from img import ask_image
 from filechat import ask_file
+from chat_flow import run_chat_turn
 
 load_dotenv()
 
@@ -248,7 +249,16 @@ def main():
                         print()
                         continue
         try:
-            answer, model_key, meta = ask(gemini_client, openai_clients, messages, prompt, use_history=not sources)
+            answer, model_key, meta, memory_result = run_chat_turn(
+                gemini_client,
+                openai_clients,
+                messages,
+                prompt,
+                question,
+                ask_fn=ask,
+                record_usage_fn=record_usage,
+                use_history=not sources,
+            )
             messages.append({"role": "user", "text": question})
             saved = answer
             if sources:
@@ -260,6 +270,17 @@ def main():
             record_usage(model_key, meta)
             usage = load_usage()
             print(f"Bot ({model_key}): {answer}\n")
+            if memory_result:
+                if memory_result["intent"] == "remember":
+                    if memory_result["saved"]:
+                        print(f"🧠 Đã cập nhật bộ nhớ: {memory_result['text']}\n")
+                else:
+                    for item in memory_result["deleted"]:
+                        print(f"🧠 Đã xóa khỏi bộ nhớ: {item['text']}")
+                    if memory_result["deleted"]:
+                        print()
+                if memory_result["error"]:
+                    print(f"⚠ Lỗi bộ nhớ: {memory_result['error']}\n")
             if sources:
                 print("Nguồn:")
                 for i, (title, uri) in enumerate(sources, 1):

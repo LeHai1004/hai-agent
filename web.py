@@ -13,6 +13,8 @@ from pathlib import Path
 from urllib.parse import quote
 
 import tools
+from chat_flow import run_chat_turn
+from config import MEMORY_BACKGROUND_SCAN
 from pins import (
     add_pin,
     format_pins,
@@ -39,7 +41,6 @@ from memory import (
     build_deletion_prompt,
     build_extraction_prompt,
     delete_memory,
-    delete_memory_by_number,
     edit_memory,
     extract_memories as validate_extracted_memories,
     has_memory_hint,
@@ -47,6 +48,8 @@ from memory import (
     memory_intent,
     memory_log,
     parse_delete_ids,
+    save_and_verify,
+    delete_and_verify,
 )
 from filechat import ask_file
 from img import ask_image
@@ -435,6 +438,8 @@ def extract_memories(project, chat_id, user_message, message_index, job_key):
 
 
 def _schedule_memory_message(project, chat_id, user_message, message_index):
+    if not MEMORY_BACKGROUND_SCAN:
+        return
     if chat_id is None:
         memory_log("[memory] bỏ qua: chưa có chat id")
         return
@@ -471,6 +476,8 @@ def _schedule_memory_message(project, chat_id, user_message, message_index):
 
 
 def _schedule_memory_extraction(project, chat_id, chat_messages, extracted_upto):
+    if not MEMORY_BACKGROUND_SCAN:
+        return
     if chat_id is None:
         memory_log("[memory] bỏ qua chat rời: chưa có chat id")
         return
@@ -775,29 +782,6 @@ function addMsg(role, text, meta, imageUrl){
   log.scrollTop = log.scrollHeight;
   return d;
 }
-async function pollMemoryRecent(since, botMessage){
-  const seen = new Set();
-  for (let attempt = 0; attempt < 4; attempt++) {
-    if (attempt > 0) await new Promise(resolve => setTimeout(resolve, 2000));
-    try {
-      const response = await fetch(`/memory/recent?since=${encodeURIComponent(since)}`);
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "Không kiểm tra được bộ nhớ");
-      for (const event of data.events || []) {
-        if (seen.has(event.id)) continue;
-        seen.add(event.id);
-        const note = document.createElement("div");
-        note.className = "memory-result";
-        const label = event.action === "remembered" ? "🧠 Đã nhớ: " : "🧠 Đã quên: ";
-        note.textContent = label + event.text;
-        botMessage.appendChild(note);
-      }
-      log.scrollTop = log.scrollHeight;
-    } catch (error) {
-      console.error("Không lấy được kết quả bộ nhớ:", error);
-    }
-  }
-}
 function addPinSuggestion(message, suggestion){
   const container = document.createElement("div");
   container.className = "pin-suggestion";
@@ -1030,7 +1014,6 @@ async function deleteSavedChat(chat){
 async function send(){
   const text = box.value.trim();
   if (!text) return;
-  const memorySince = Date.now();
   box.value = "";
   const imagePreview = pendingImagePreview;
   pendingImagePreview = null;
@@ -1047,7 +1030,26 @@ async function send(){
     const reply = text === "/new" && data.new ? "" : data.reply || data.error || "(không có phản hồi)";
     const botMessage = reply ? addMsg("bot", reply, data.model || "") : null;
     if (botMessage) {
-      pollMemoryRecent(memorySince, botMessage);
+      const memoryResult = data.memory_result;
+      if (memoryResult && memoryResult.intent === "remember" && memoryResult.saved) {
+        const note = document.createElement("div");
+        note.className = "memory-result";
+        note.textContent = "🧠 Đã cập nhật bộ nhớ: " + memoryResult.text;
+        botMessage.appendChild(note);
+      } else if (memoryResult && memoryResult.intent === "forget") {
+        for (const item of memoryResult.deleted || []) {
+          const note = document.createElement("div");
+          note.className = "memory-result";
+          note.textContent = "🧠 Đã xóa khỏi bộ nhớ: " + item.text;
+          botMessage.appendChild(note);
+        }
+      }
+      if (data.memory_error) {
+        const note = document.createElement("div");
+        note.className = "memory-result";
+        note.textContent = "⚠ Lỗi bộ nhớ: " + data.memory_error;
+        botMessage.appendChild(note);
+      }
     }
     if (data.exports && botMessage) addExportButtons(botMessage, data.exports);
     if (data.suggest_pin && botMessage) addPinSuggestion(botMessage, data.suggest_pin);
@@ -1291,6 +1293,8 @@ def memory_add():
             else "Thông tin này đã có trong bộ nhớ."
         )
         return jsonify(error=message, memories=list_memories()), 409
+    if not any(entry["id"] == item["id"] for entry in list_memories()):
+        return jsonify(error="Không xác minh được mục trong file bộ nhớ."), 500
     _record_memory_event("remembered", item["text"])
     return jsonify(message="Đã thêm vào bộ nhớ.", memories=list_memories()), 201
 
@@ -1320,8 +1324,11 @@ def memory_delete(memory_id):
         (entry for entry in list_memories() if entry["id"] == memory_id),
         None,
     )
-    if item is None or not delete_memory(memory_id):
+    if item is None:
         return jsonify(error="Không tìm thấy mục ghi nhớ.", memories=list_memories()), 404
+    result = delete_and_verify(memory_id)
+    if not result["deleted"]:
+        return jsonify(error=result["error"], memories=list_memories()), 500
     _record_memory_event("forgot", item["text"])
     return jsonify(message="Đã xóa mục ghi nhớ.", memories=list_memories())
 
@@ -1555,17 +1562,24 @@ def _process_chat_message(text):
         if not memory_text:
             return {"reply": "Dùng: /nho nội dung cần ghi nhớ", "model": ""}
         try:
-            _, reason = add_memory(memory_text, "người dùng nhập tay")
+            save_result = save_and_verify(memory_text)
         except ValueError as error:
             return {"reply": str(error), "model": ""}
-        if reason == "full":
-            reply = "Bộ nhớ đã đủ 40 mục; hãy xóa một mục trước khi thêm."
-        elif reason == "duplicate":
-            reply = "Thông tin này đã có trong bộ nhớ."
-        else:
+        if save_result["saved"]:
             reply = "Đã ghi nhớ thông tin trên mọi project."
             _record_memory_event("remembered", memory_text)
-        return {"reply": reply, "model": ""}
+        else:
+            reply = f"Chưa lưu được thông tin: {save_result['error']}"
+        result = {"reply": reply, "model": ""}
+        if save_result["saved"]:
+            result["memory_result"] = {
+                "intent": "remember",
+                "saved": True,
+                "text": memory_text,
+            }
+        else:
+            result["memory_error"] = save_result["error"]
+        return result
     if text == "/bonho":
         saved_memories = list_memories()
         if not saved_memories:
@@ -1579,11 +1593,24 @@ def _process_chat_message(text):
         match = re.fullmatch(r"/quen\s+(\d+)", text)
         if not match:
             return {"reply": "Dùng: /quen số_thứ_tự", "model": ""}
-        deleted = delete_memory_by_number(int(match.group(1)))
-        if deleted is None:
+        memories = list_memories()
+        number = int(match.group(1))
+        if number < 1 or number > len(memories):
             return {"reply": "Không tìm thấy mục bộ nhớ theo số đó.", "model": ""}
+        deleted = memories[number - 1]
+        result = delete_and_verify(deleted["id"])
+        if not result["deleted"]:
+            return {"reply": f"Không xóa được mục bộ nhớ: {result['error']}", "model": ""}
         _record_memory_event("forgot", deleted["text"])
-        return {"reply": f"Đã quên: {deleted['text']}", "model": ""}
+        return {
+            "reply": "Đã xóa mục khỏi bộ nhớ.",
+            "model": "",
+            "memory_result": {
+                "intent": "forget",
+                "deleted": [deleted],
+                "error": None,
+            },
+        }
     if text.startswith("/export"):
         try:
             json_path, _ = export_chat(messages, text[7:])
@@ -1753,11 +1780,14 @@ def _process_chat_message(text):
         prompt = build_prompt(question, results)
         sources = [(r.get("title", ""), r.get("href", "")) for r in results]
     try:
-        answer, model_key, meta = ask(
+        answer, model_key, meta, memory_result = run_chat_turn(
             gemini_client,
             openai_clients,
             messages,
             prompt,
+            question,
+            ask_fn=ask,
+            record_usage_fn=record_usage,
             use_history=not sources,
             project=current_project,
         )
@@ -1776,6 +1806,14 @@ def _process_chat_message(text):
         "model": model_key,
         "usage": format_usage(load_usage(), model_key),
     }
+    if memory_result:
+        result["memory_result"] = memory_result
+        if memory_result["intent"] == "remember":
+            if not memory_result["saved"] and memory_result["error"]:
+                result["memory_error"] = memory_result["error"]
+        else:
+            if memory_result["error"]:
+                result["memory_error"] = memory_result["error"]
     if looks_personal(text):
         result["suggest_pin"] = text
     return result

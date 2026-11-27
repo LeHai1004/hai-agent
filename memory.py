@@ -134,6 +134,43 @@ def add_memory(text, source):
         return item, None
 
 
+def save_and_verify(text):
+    memory_id = None
+    try:
+        item, reason = add_memory(text, text)
+        if item is not None:
+            memory_id = item["id"]
+        memories = load_memories()
+        if memory_id is not None:
+            if any(entry["id"] == memory_id for entry in memories):
+                return {"saved": True, "id": memory_id, "error": None}
+            return {
+                "saved": False,
+                "id": memory_id,
+                "error": "Không tìm thấy mục vừa ghi trong file bộ nhớ.",
+            }
+        if reason == "duplicate":
+            normalized_text = _normalized(text)
+            existing = next(
+                (entry for entry in memories if _normalized(entry["text"]) == normalized_text),
+                None,
+            )
+            if existing is not None:
+                return {"saved": True, "id": existing["id"], "error": None}
+            return {
+                "saved": False,
+                "id": None,
+                "error": "Mục trùng không có trong file bộ nhớ sau khi đọc lại.",
+            }
+        if reason == "full":
+            error = f"Bộ nhớ đã đủ {MAX_MEMORIES} mục."
+        else:
+            error = "Không ghi được mục vào bộ nhớ."
+        return {"saved": False, "id": None, "error": error}
+    except Exception as error:
+        return {"saved": False, "id": memory_id, "error": str(error)}
+
+
 def add_memories(facts):
     facts = list(facts)
     added = []
@@ -190,6 +227,25 @@ def delete_memory(memory_id):
             return False
         _save_unlocked(remaining)
         return True
+
+
+def delete_and_verify(memory_id):
+    try:
+        if not delete_memory(memory_id):
+            return {
+                "deleted": False,
+                "id": memory_id,
+                "error": "Không tìm thấy mục bộ nhớ cần xóa.",
+            }
+        if any(item["id"] == memory_id for item in load_memories()):
+            return {
+                "deleted": False,
+                "id": memory_id,
+                "error": "Mục bộ nhớ vẫn còn trong file sau khi xóa.",
+            }
+        return {"deleted": True, "id": memory_id, "error": None}
+    except Exception as error:
+        return {"deleted": False, "id": memory_id, "error": str(error)}
 
 
 def delete_memory_by_number(number):

@@ -96,6 +96,7 @@ class MemoryChatPipelineTests(unittest.TestCase):
         self._patch("MEMORY_PATH", root / "memory" / "global.json", memory)
         self._patch("PROJECTS_DIR", root / "projects", self.web)
         self._patch("LEGACY_CHAT_DIR", root / "legacy-chats", self.web)
+        self._patch("MEMORY_BACKGROUND_SCAN", True, self.web)
 
         self.old_state = {
             "current_project": self.web.current_project,
@@ -152,7 +153,7 @@ class MemoryChatPipelineTests(unittest.TestCase):
         self.web.memory_recent_events.clear()
         self.web.memory_recent_events.extend(self.old_state["memory_recent_events"])
 
-    def _run_chat_turn(self, user_message, extraction_reply):
+    def _run_chat_turn(self, user_message, extraction_reply, expected_workers=1):
         worker_threads = []
         model_overrides = []
         extraction_prompts = []
@@ -183,9 +184,10 @@ class MemoryChatPipelineTests(unittest.TestCase):
                 self.assertFalse(
                     thread.is_alive(), "memory extraction worker did not finish"
                 )
-        self.assertEqual(len(worker_threads), 1)
-        self.assertIn("gemini/gemini-3.5-flash-lite", model_overrides)
-        self.assertIn(user_message, extraction_prompts[0])
+        self.assertEqual(len(worker_threads), expected_workers)
+        if expected_workers:
+            self.assertIn("gemini/gemini-3.5-flash-lite", model_overrides)
+            self.assertIn(user_message, extraction_prompts[0])
 
     def test_chat_turn_extracts_multiple_long_term_facts(self):
         reply = json.dumps({
@@ -222,10 +224,15 @@ class MemoryChatPipelineTests(unittest.TestCase):
                 "source": "tôi dùng SQL Server",
             }]
         }, ensure_ascii=False)
-        self._run_chat_turn("nhớ giúp tôi rằng tôi dùng SQL Server", reply)
+        with patch.object(self.web, "MEMORY_BACKGROUND_SCAN", False):
+            self._run_chat_turn(
+                "nhớ giúp tôi rằng tôi dùng SQL Server",
+                reply,
+                expected_workers=0,
+            )
         self.assertEqual(
             [item["text"] for item in memory.load_memories()],
-            ["Dùng SQL Server"],
+            ["tôi dùng SQL Server"],
         )
 
     def test_natural_forget_request_deletes_only_selected_memory(self):
