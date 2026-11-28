@@ -144,7 +144,7 @@ class ArtifactTests(unittest.TestCase):
         code = artifacts.create_artifact(
             "Prime check",
             "code",
-            "print('<safe>')",
+            "# 😀\nprint('<safe>')",
             language="python",
             project="project-a",
         )
@@ -161,7 +161,14 @@ class ArtifactTests(unittest.TestCase):
             self.assertEqual(markdown_page.status_code, 200)
             markdown_html = markdown_page.get_data(as_text=True)
             self.assertIn("Guide &lt;safe&gt;", markdown_html)
-            self.assertIn("render(document.getElementById('artifact-source').value)", markdown_html)
+            self.assertIn(
+                "element.innerHTML=render(sourceSlice(block.start,block.end));",
+                markdown_html,
+            )
+            self.assertIn("element.dataset.start=block.start;", markdown_html)
+            self.assertIn("element.dataset.end=block.end;", markdown_html)
+            self.assertIn('id="edit-selection"', markdown_html)
+            self.assertIn('id="edit-form"', markdown_html)
             self.assertIn("&lt;/textarea&gt;&lt;script&gt;", markdown_html)
             self.assertIn("Sao chép", markdown_html)
             self.assertIn("Tải về", markdown_html)
@@ -171,6 +178,9 @@ class ArtifactTests(unittest.TestCase):
             code_html = code_page.get_data(as_text=True)
             self.assertIn("class=\"language-label\">python", code_html)
             self.assertIn("print('&lt;safe&gt;')", code_html)
+            self.assertIn('"type": "code_line"', code_html)
+            self.assertIn('"start": 0, "end": 4', code_html)
+            self.assertIn("line.textContent=sourceSlice(block.start,block.end);", code_html)
             self.assertIn("python:'py'", code_html)
             self.assertEqual(
                 client.get(f"/artifact-view/{other_project['id']}").status_code,

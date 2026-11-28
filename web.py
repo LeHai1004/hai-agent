@@ -18,6 +18,7 @@ from artifacts import (
     apply_patch as apply_artifact_patch,
     get_artifact,
     list_artifacts,
+    split_markdown_blocks,
 )
 from chat_flow import (
     run_chat_turn,
@@ -1741,21 +1742,58 @@ def artifact_view(artifact_id):
     title = html.escape(artifact["title"], quote=True)
     language = html.escape(artifact.get("language", "text"), quote=True)
     source = html.escape(artifact["content"], quote=False)
+    version = artifact["versions"][-1]["number"]
+    highlight_range = None
+    try:
+        highlight_start = int(request.args["highlight_start"])
+        highlight_end = int(request.args["highlight_end"])
+        highlight_version = int(request.args["highlight_version"])
+        if (
+            highlight_version == version
+            and 0 <= highlight_start <= highlight_end <= len(artifact["content"])
+        ):
+            highlight_range = {
+                "start": highlight_start,
+                "end": highlight_end,
+            }
+    except (KeyError, TypeError, ValueError):
+        pass
     if artifact["type"] == "markdown":
+        blocks = [
+            {
+                "type": block["type"],
+                "start": block["start"],
+                "end": block["end"],
+            }
+            for block in split_markdown_blocks(artifact["content"])
+        ]
+        block_data = html.escape(
+            json.dumps(blocks, ensure_ascii=False),
+            quote=False,
+        )
         content = '<main id="artifact-content" class="markdown-content"></main>'
-        content_script = (
-            "document.getElementById('artifact-content').innerHTML="
-            "render(document.getElementById('artifact-source').value);"
-        )
+        content_script = "renderMarkdownBlocks();"
     else:
-        content = (
-            '<main class="code-content"><div class="language-label">'
-            + language
-            + '</div><pre><code>'
-            + source
-            + "</code></pre></main>"
+        blocks = []
+        offset = 0
+        for line in artifact["content"].splitlines(keepends=True):
+            end = offset + len(line)
+            blocks.append({
+                "type": "code_line",
+                "start": offset,
+                "end": end,
+            })
+            offset = end
+        block_data = html.escape(
+            json.dumps(blocks, ensure_ascii=False),
+            quote=False,
         )
-        content_script = ""
+        content = (
+            '<main id="artifact-content" class="code-content">'
+            '<div class="language-label">' + language
+            + '</div><pre><code id="code-source"></code></pre></main>'
+        )
+        content_script = "renderCodeLines();"
     page = (
         "<!DOCTYPE html><html lang=\"vi\"><head><meta charset=\"UTF-8\">"
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
@@ -1770,8 +1808,11 @@ def artifact_view(artifact_id):
         "flex:1;margin:0}.toolbar button{border:0;border-radius:6px;padding:6px 10px;"
         "background:#2e3036;color:#e8e8ea;cursor:pointer;white-space:nowrap}"
         ".toolbar button:hover{background:#3a3d45}.status{color:#8b8f99;"
-        "font-size:.78rem;min-height:1em}.markdown-content,.code-content{flex:1;"
+        "font-size:.78rem;min-height:1em}#artifact-version{color:#aeb4c0;"
+        "font-size:.8rem;white-space:nowrap}.markdown-content,.code-content{flex:1;"
         "min-height:0;overflow:auto;line-height:1.6;overflow-wrap:anywhere}"
+        ".artifact-block{border-radius:4px}.artifact-block.selected-block{"
+        "background:#354256;outline:1px solid #536984}"
         ".code-content{position:relative}.language-label{position:sticky;top:0;"
         "z-index:1;width:fit-content;margin-left:auto;padding:3px 8px;"
         "border-radius:0 0 0 6px;background:#24262b;color:#aeb4c0;font-size:.75rem}"
@@ -1782,13 +1823,35 @@ def artifact_view(artifact_id):
         "font-weight:700;line-height:1.3;margin:8px 0 4px}h3{font-size:1.15rem}"
         "h4{font-size:1.08rem}h5{font-size:1rem}hr{border:0;border-top:1px solid "
         "#555;opacity:.6;margin:8px 0}a{color:#7cb2ff}"
+        "#edit-form{padding:10px;border:1px solid #3a3d45;border-radius:8px;"
+        "background:#24262b}#edit-form label{display:block;margin-bottom:6px;"
+        "font-size:.9rem}#edit-instruction{width:100%;min-height:58px;resize:vertical;"
+        "padding:8px;border:1px solid #3a3d45;border-radius:6px;background:#1b1c1f;"
+        "color:#e8e8ea;font:inherit}#edit-actions{display:flex;gap:6px;"
+        "margin-top:7px}#edit-actions button{padding:5px 10px}"
+        "#edit-status{min-height:1.2em;margin-top:5px;color:#aeb4c0;font-size:.8rem}"
+        "#edit-selection{position:fixed;z-index:5;padding:6px 9px;border:1px solid "
+        "#536984;border-radius:7px;background:#2e3036;color:#e8e8ea;cursor:pointer;"
+        "box-shadow:0 4px 14px #0008} [hidden]{display:none!important}"
         "</style></head><body><header class=\"toolbar\"><h1>"
         + title
-        + '</h1><button id="copy" type="button">Sao chép</button>'
+        + '</h1><span id="artifact-version">v'
+        + str(version)
+        + '</span><button id="copy" type="button">Sao chép</button>'
         '<button id="download" type="button">Tải về</button></header>'
         '<div id="status" class="status" aria-live="polite"></div>'
+        '<form id="edit-form" hidden><label for="edit-instruction">'
+        "Bạn muốn sửa thế nào?</label>"
+        '<textarea id="edit-instruction" rows="2"></textarea>'
+        '<div id="edit-actions"><button id="edit-send" type="submit">Gửi</button>'
+        '<button id="edit-cancel" class="ghost" type="button">Hủy</button></div>'
+        '<div id="edit-status" aria-live="polite"></div></form>'
+        '<button id="edit-selection" type="button" hidden>✏️ Sửa đoạn này</button>'
         '<textarea id="artifact-source" hidden>'
         + source
+        + "</textarea>"
+        '<textarea id="artifact-block-data" hidden>'
+        + block_data
         + "</textarea>"
         + content
         + "<script>"
@@ -1809,8 +1872,112 @@ def artifact_view(artifact_id):
         'if(heading){const level=2+heading[1].length;'
         'return `<h${level}>${inline(heading[2])}</h${level}>`;}'
         'if(line==="---")return "<hr>";return inline(line);}).join("<br>")).join("");}'
+        "const sourceElement=document.getElementById('artifact-source');"
+        "let source=sourceElement.value;"
+        "const artifactBlocks=JSON.parse(document.getElementById('artifact-block-data').value);"
+        "const artifactId="
+        + json.dumps(artifact_id)
+        + ";let currentVersion="
+        + str(version)
+        + ";const highlightRange="
+        + json.dumps(highlight_range)
+        + ";const codeUnitOffsets=[0];"
+        "for(let index=0;index<source.length;){"
+        "const point=source.codePointAt(index);index+=point>65535?2:1;"
+        "codeUnitOffsets.push(index);}"
+        "function sourceSlice(start,end){"
+        "return source.slice(codeUnitOffsets[start],codeUnitOffsets[end]);}"
+        "function renderMarkdownBlocks(){"
+        "const root=document.getElementById('artifact-content');root.replaceChildren();"
+        "artifactBlocks.forEach(block=>{const element=document.createElement('div');"
+        "element.className='artifact-block';element.dataset.start=block.start;"
+        "element.dataset.end=block.end;"
+        "element.innerHTML=render(sourceSlice(block.start,block.end));"
+        "root.appendChild(element);});}"
+        "function renderCodeLines(){"
+        "const code=document.getElementById('code-source');code.replaceChildren();"
+        "artifactBlocks.forEach(block=>{const line=document.createElement('span');"
+        "line.className='artifact-block code-line';line.dataset.start=block.start;"
+        "line.dataset.end=block.end;line.textContent=sourceSlice(block.start,block.end);"
+        "code.appendChild(line);});}"
+        "const contentRoot=document.getElementById('artifact-content');"
+        "const editButton=document.getElementById('edit-selection');"
+        "const editForm=document.getElementById('edit-form');"
+        "const editInput=document.getElementById('edit-instruction');"
+        "const editStatus=document.getElementById('edit-status');"
+        "let activeSelection=null;let activeBlocks=[];let patchInProgress=false;"
+        "function clearBlockHighlight(){"
+        "activeBlocks.forEach(block=>block.classList.remove('selected-block'));"
+        "activeBlocks=[];}"
+        "function positionEditButton(){"
+        "if(!editForm.hidden){editButton.hidden=true;return;}"
+        "const selection=window.getSelection();"
+        "if(!selection||selection.isCollapsed||!selection.rangeCount||"
+        "!contentRoot.contains(selection.anchorNode)||"
+        "!contentRoot.contains(selection.focusNode)){"
+        "editButton.hidden=true;activeSelection=null;return;}"
+        "const range=selection.getRangeAt(0);"
+        "const blocks=Array.from(contentRoot.querySelectorAll('.artifact-block'))"
+        ".filter(block=>{try{return range.intersectsNode(block);}catch(_error){return false;}});"
+        "if(!blocks.length){editButton.hidden=true;activeSelection=null;return;}"
+        "activeBlocks=blocks;"
+        "activeSelection={"
+        "start:Math.min(...blocks.map(block=>Number(block.dataset.start))),"
+        "end:Math.max(...blocks.map(block=>Number(block.dataset.end)))};"
+        "editButton.hidden=false;const rect=range.getBoundingClientRect();"
+        "const left=Math.max(8,Math.min(window.innerWidth-editButton.offsetWidth-8,rect.left));"
+        "editButton.style.left=left+'px';"
+        "editButton.style.top=Math.max(8,rect.top-40)+'px';}"
+        "document.addEventListener('selectionchange',positionEditButton);"
+        "document.addEventListener('mouseup',positionEditButton);"
+        "document.addEventListener('keyup',positionEditButton);"
+        "editButton.addEventListener('mousedown',event=>event.preventDefault());"
+        "editButton.addEventListener('click',()=>{"
+        "if(!activeSelection)return;"
+        "activeBlocks.forEach(block=>block.classList.add('selected-block'));"
+        "editButton.hidden=true;editForm.hidden=false;editInput.value='';"
+        "editStatus.textContent='';editInput.focus();});"
+        "function closeEditForm(){"
+        "if(patchInProgress)return;clearBlockHighlight();activeSelection=null;"
+        "editForm.hidden=true;editInput.value='';editStatus.textContent='';"
+        "const selection=window.getSelection();if(selection)selection.removeAllRanges();}"
+        "document.getElementById('edit-cancel').addEventListener('click',closeEditForm);"
+        "editForm.addEventListener('submit',async event=>{"
+        "event.preventDefault();if(!activeSelection||patchInProgress)return;"
+        "const instruction=editInput.value.trim();"
+        "if(!instruction){editStatus.textContent='Hãy nhập yêu cầu chỉnh sửa.';return;}"
+        "patchInProgress=true;editInput.disabled=true;"
+        "document.getElementById('edit-send').disabled=true;"
+        "document.getElementById('edit-cancel').disabled=true;"
+        "editStatus.textContent='Đang sửa…';"
+        "try{const response=await fetch('/api/artifacts/'+encodeURIComponent(artifactId)"
+        "+'/patch',{method:'POST',headers:{'Content-Type':'application/json'},"
+        "body:JSON.stringify({base_version:currentVersion,start:activeSelection.start,"
+        "end:activeSelection.end,instruction})});"
+        "const data=await response.json().catch(()=>({}));"
+        "if(!response.ok)throw new Error(data.error||'Không sửa được đoạn Artifact.');"
+        "if(typeof data.content!=='string'||!Number.isInteger(data.version)||"
+        "!Number.isInteger(data.start)||!Number.isInteger(data.end_moi)){"
+        "throw new Error('Phản hồi sửa Artifact không hợp lệ.');}"
+        "const query=new URLSearchParams({highlight_start:String(data.start),"
+        "highlight_end:String(data.end_moi),highlight_version:String(data.version)});"
+        "window.location.replace(location.pathname+'?'+query.toString());"
+        "}catch(error){"
+        "editStatus.textContent=error.message||'Không sửa được đoạn Artifact.';"
+        "patchInProgress=false;editInput.disabled=false;"
+        "document.getElementById('edit-send').disabled=false;"
+        "document.getElementById('edit-cancel').disabled=false;}});"
+        "function highlightPatchedBlocks(){"
+        "if(!highlightRange)return;let first=null;"
+        "contentRoot.querySelectorAll('.artifact-block').forEach(block=>{"
+        "const start=Number(block.dataset.start),end=Number(block.dataset.end);"
+        "if(start<highlightRange.end&&end>highlightRange.start){"
+        "block.classList.add('selected-block');if(!first)first=block;}});"
+        "if(first){first.scrollIntoView({block:'nearest'});"
+        "setTimeout(()=>contentRoot.querySelectorAll('.selected-block')"
+        ".forEach(block=>block.classList.remove('selected-block')),3000);}}"
         + content_script
-        + "const source=document.getElementById('artifact-source').value;"
+        + "highlightPatchedBlocks();"
         "const status=document.getElementById('status');"
         "document.getElementById('copy').addEventListener('click',async()=>{"
         "try{await navigator.clipboard.writeText(source);status.textContent='Đã sao chép.';}"
@@ -1990,6 +2157,23 @@ def api_artifact(artifact_id):
     return jsonify(artifact=artifact)
 
 
+def _explicit_structure_change_requested(instruction):
+    action = (
+        r"(?:thêm|bổ sung|xóa|xoá|bỏ|bớt|loại bỏ|add|insert|delete|remove|"
+        r"omit|drop)"
+    )
+    target = (
+        r"(?:tiêu đề|mục|dòng|khối|đoạn|danh sách|bullet|heading|item|line|"
+        r"block|section|paragraph)"
+    )
+    return re.search(
+        rf"\b{action}\b.{{0,40}}\b{target}\b"
+        rf"|\b{target}\b.{{0,40}}\b{action}\b",
+        instruction,
+        re.IGNORECASE,
+    ) is not None
+
+
 @app.post("/api/artifacts/<artifact_id>/patch")
 def api_artifact_patch(artifact_id):
     data = request.get_json(silent=True)
@@ -2049,7 +2233,10 @@ def api_artifact_patch(artifact_id):
     prompt = (
         f"Chỉnh sửa Artifact dạng {artifact_format} theo yêu cầu bên dưới. "
         "Chỉ trả về nội dung thay thế cho đoạn được chọn, không giải thích. "
-        "Giữ định dạng Markdown và ngôn ngữ của đoạn. "
+        "Giữ nguyên cấu trúc Markdown của đoạn gốc: cùng số lượng và loại "
+        "tiêu đề, mục danh sách, khối code; giữ nguyên cách xuống dòng, mỗi "
+        "mục danh sách một dòng riêng. Chỉ đổi nội dung chữ theo yêu cầu, "
+        "không gộp các dòng hoặc khối lại. "
         "Nếu đây là code, chỉ trả về code thay thế đúng đoạn đã chọn, "
         "không bọc thêm ```.\n\n"
         f"Ngữ cảnh trước:\n{context_before}\n\n"
@@ -2076,6 +2263,49 @@ def api_artifact_patch(artifact_id):
             error="Model trả nội dung thay thế rỗng; Artifact chưa được thay đổi."
         ), 502
 
+    selected_leading_length = len(selected_text) - len(selected_text.lstrip())
+    selected_trailing_start = len(selected_text.rstrip())
+    if selected_trailing_start < selected_leading_length:
+        selected_trailing_start = selected_leading_length
+    selected_leading = selected_text[:selected_leading_length]
+    selected_trailing = selected_text[selected_trailing_start:]
+
+    replacement = replacement.strip()
+    original_is_fenced = re.fullmatch(
+        r"```[^\r\n]*\r?\n.*?\r?\n```",
+        selected_text.strip(),
+        re.DOTALL,
+    ) is not None
+    fenced_reply = re.fullmatch(
+        r"```[^\r\n]*\r?\n(.*?)\r?\n```",
+        replacement,
+        re.DOTALL,
+    )
+    if fenced_reply:
+        unwrapped_reply = fenced_reply.group(1).strip()
+        wrapped_inner_fence = re.fullmatch(
+            r"```[^\r\n]*\r?\n.*?\r?\n```",
+            unwrapped_reply,
+            re.DOTALL,
+        ) is not None
+        if not original_is_fenced or wrapped_inner_fence:
+            replacement = unwrapped_reply
+
+    original_blocks = split_markdown_blocks(selected_text)
+    replacement_blocks = split_markdown_blocks(replacement)
+    original_structure = [block["type"] for block in original_blocks]
+    replacement_structure = [block["type"] for block in replacement_blocks]
+    if (
+        original_structure != replacement_structure
+        and not _explicit_structure_change_requested(instruction)
+    ):
+        return jsonify(
+            error=(
+                "Kết quả sửa làm đổi cấu trúc, thử lại hoặc chọn đoạn nhỏ hơn."
+            )
+        ), 422
+
+    replacement = selected_leading + replacement + selected_trailing
     try:
         updated = apply_artifact_patch(
             artifact_id,

@@ -173,6 +173,92 @@ class ArtifactPatchTests(unittest.TestCase):
         self.assertFalse(captured["kwargs"]["allow_tools"])
         self.assertFalse(captured["kwargs"]["use_history"])
 
+    def test_patch_route_preserves_boundary_whitespace_and_removes_reply_fence(self):
+        content = "# Before\n\nold\n\n# After\n"
+        artifact = artifacts.create_artifact(
+            "Guide",
+            "markdown",
+            content,
+            project="project-a",
+        )
+        start = content.index("old") - 2
+        end = content.index("old") + len("old") + 2
+
+        def fake_ask(*_args, **_kwargs):
+            return "```markdown\nshorter\n```", "fake/model", None
+
+        with (
+            patch.object(self.web, "current_project", "project-a"),
+            patch.object(self.web, "ask", side_effect=fake_ask),
+        ):
+            response = self.web.app.test_client().post(
+                f"/api/artifacts/{artifact['id']}/patch",
+                json={
+                    "base_version": 1,
+                    "start": start,
+                    "end": end,
+                    "instruction": "viết gọn hơn",
+                },
+            )
+
+        expected = "# Before\n\nshorter\n\n# After\n"
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["content"], expected)
+        self.assertEqual(
+            response.json["end_moi"],
+            start + len("\n\nshorter\n\n"),
+        )
+
+    def test_patch_route_rejects_collapsed_heading_and_list(self):
+        content = (
+            "## 2. Quy trình làm việc cơ bản\n"
+            "- Kiểm tra trạng thái thay đổi:\n"
+        )
+        artifact = artifacts.create_artifact(
+            "Guide",
+            "markdown",
+            content,
+            project="project-a",
+        )
+        self.assertEqual(
+            [block["type"] for block in artifacts.split_markdown_blocks(content)],
+            ["heading", "list"],
+        )
+        prompt = {}
+
+        def fake_ask(*args, **_kwargs):
+            prompt["text"] = args[3]
+            return (
+                "## 2. Quy trình làm việc cơ bản - "
+                "Kiểm tra trạng thái thay đổi:",
+                "fake/model",
+                None,
+            )
+
+        with (
+            patch.object(self.web, "current_project", "project-a"),
+            patch.object(self.web, "ask", side_effect=fake_ask),
+        ):
+            response = self.web.app.test_client().post(
+                f"/api/artifacts/{artifact['id']}/patch",
+                json={
+                    "base_version": 1,
+                    "start": 0,
+                    "end": len(content),
+                    "instruction": "viết câu gọn hơn",
+                },
+            )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(
+            response.json["error"],
+            "Kết quả sửa làm đổi cấu trúc, thử lại hoặc chọn đoạn nhỏ hơn.",
+        )
+        self.assertIn("không gộp các dòng hoặc khối lại", prompt["text"])
+        unchanged = artifacts.get_artifact(artifact["id"], "project-a")
+        self.assertEqual(unchanged["content"], content)
+        self.assertEqual([version["number"] for version in unchanged["versions"]], [1])
+
     def test_code_patch_keeps_language_and_does_not_add_fences(self):
         content = "def add(a, b):\n    return a - b\n"
         artifact = artifacts.create_artifact(
