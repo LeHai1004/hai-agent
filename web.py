@@ -873,6 +873,7 @@ async function pollMemoryRecent(since, botMessage){
       const response = await fetch(`/memory/recent?since=${encodeURIComponent(since)}`);
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Không kiểm tra được bộ nhớ");
+      const shouldScroll = log.scrollHeight - log.scrollTop - log.clientHeight < 48;
       for (const event of data.events || []) {
         if (event.action !== "scanned" || seen.has(event.id)) continue;
         seen.add(event.id);
@@ -881,7 +882,7 @@ async function pollMemoryRecent(since, botMessage){
         note.textContent = "🧠 Đã cập nhật bộ nhớ: " + event.text;
         botMessage.appendChild(note);
       }
-      log.scrollTop = log.scrollHeight;
+      if (shouldScroll) log.scrollTop = log.scrollHeight;
     } catch (error) {
       console.error("Không lấy được kết quả bộ nhớ:", error);
     }
@@ -1120,30 +1121,204 @@ async function send(){
   const text = box.value.trim();
   if (!text) return;
   const memorySince = Date.now();
+  let autoScroll = log.scrollHeight - log.scrollTop - log.clientHeight < 48;
+  const previousScrollTop = log.scrollTop;
   box.value = "";
   const imagePreview = pendingImagePreview;
   pendingImagePreview = null;
   addMsg("user", text, "", imagePreview);
-  const wait = addMsg("bot", "Đang trả lời...");
+  const wait = addMsg("bot", "");
+  const streamText = document.createTextNode("Đang trả lời...");
+  wait.appendChild(streamText);
+  if (!autoScroll) log.scrollTop = previousScrollTop;
+  const trackScroll = () => {
+    autoScroll = log.scrollHeight - log.scrollTop - log.clientHeight < 48;
+  };
+  log.addEventListener("scroll", trackScroll);
+  const keepScrolled = () => {
+    if (autoScroll) log.scrollTop = log.scrollHeight;
+  };
   sendBtn.disabled = true;
   try {
     const r = await fetch("/api/chat", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({text})});
-    let data = await r.json();
-    if (!r.ok) throw new Error(data.error || "Yêu cầu thất bại");
-    if (data.pending) data = await waitForChat(data.request_id);
-    wait.remove();
+    const accepted = await r.json();
+    if (!r.ok) throw new Error(accepted.error || "Yêu cầu thất bại");
+    let data = accepted;
+    let streamedFinal = null;
+    let streamError = null;
+    if (accepted.pending && accepted.request_id) {
+      const requestId = accepted.request_id;
+      const polledResult = waitForChat(requestId).catch(error => ({pollError:error}));
+      if (typeof EventSource === "function") {
+        let source;
+        let connectionErrors = 0;
+        const streamOutcome = await new Promise(resolve => {
+          let settled = false;
+          const finishStream = outcome => {
+            if (settled) return;
+            settled = true;
+            if (source) source.close();
+            resolve(outcome);
+          };
+          try {
+            source = new EventSource(`/events/${encodeURIComponent(requestId)}`);
+          } catch (error) {
+            console.warn("Không mở được SSE; dùng polling:", error);
+            finishStream("fallback");
+            return;
+          }
+          source.onopen = () => { connectionErrors = 0; };
+          source.addEventListener("token", event => {
+            try {
+              const payload = JSON.parse(event.data);
+              if (streamText.textContent === "Đang trả lời...") {
+                streamText.textContent = "";
+              }
+              const status = wait.querySelector(".stream-tool-status");
+              if (status) status.remove();
+              streamText.textContent += payload.text || "";
+              keepScrolled();
+            } catch (error) {
+              console.error("SSE token không hợp lệ:", error);
+            }
+          });
+          source.addEventListener("tool", event => {
+            try {
+              const payload = JSON.parse(event.data);
+              let status = wait.querySelector(".stream-tool-status");
+              if (!status) {
+                status = document.createElement("div");
+                status.className = "meta stream-tool-status";
+                wait.appendChild(status);
+              }
+              status.textContent = `đang dùng ${payload.name}…`;
+              keepScrolled();
+            } catch (error) {
+              console.error("SSE tool event không hợp lệ:", error);
+            }
+          });
+          source.addEventListener("memory", event => {
+            try {
+              const payload = JSON.parse(event.data);
+              const note = document.createElement("div");
+              note.className = "memory-result";
+              note.textContent = "🧠 Đã cập nhật bộ nhớ: " + payload.text;
+              wait.appendChild(note);
+              keepScrolled();
+            } catch (error) {
+              console.error("SSE memory event không hợp lệ:", error);
+            }
+          });
+          source.addEventListener("final", event => {
+            try {
+              streamedFinal = JSON.parse(event.data);
+              const memoryNotes = Array.from(
+                wait.querySelectorAll(".memory-result")
+              );
+              wait.innerHTML = render(streamedFinal.reply || "");
+              if (streamedFinal.model) {
+                const meta = document.createElement("div");
+                meta.className = "meta";
+                meta.textContent = streamedFinal.model;
+                wait.appendChild(meta);
+              }
+              memoryNotes.forEach(note => wait.appendChild(note));
+              keepScrolled();
+            } catch (error) {
+              console.error("SSE final event không hợp lệ:", error);
+            }
+          });
+          source.addEventListener("error", event => {
+            if (!event.data) return;
+            try {
+              const payload = JSON.parse(event.data);
+              streamError = payload.message || "Luồng trả lời gặp lỗi.";
+              finishStream("error");
+            } catch (error) {
+              console.error("SSE error event không hợp lệ:", error);
+            }
+          });
+          source.addEventListener("done", () => {
+            finishStream("done");
+            sendBtn.disabled = false;
+            box.focus();
+          });
+          source.onerror = () => {
+            connectionErrors += 1;
+            if (connectionErrors >= 3) finishStream("fallback");
+          };
+        });
+        if (streamOutcome === "fallback") {
+          console.warn("SSE reconnect failed; using chat status polling.");
+        }
+      } else {
+        console.warn("EventSource unavailable; using chat status polling.");
+      }
+      const polled = await polledResult;
+      if (polled && polled.pollError) throw polled.pollError;
+      data = polled;
+      if (streamedFinal) {
+        data.reply = streamedFinal.reply || data.reply;
+        data.model = streamedFinal.model || data.model;
+        if (typeof polled.reply === "string" && polled.reply !== streamedFinal.reply) {
+          data.reply = polled.reply;
+          const memoryNotes = Array.from(wait.querySelectorAll(".memory-result"));
+          wait.innerHTML = render(data.reply);
+          if (data.model) {
+            const meta = document.createElement("div");
+            meta.className = "meta";
+            meta.textContent = data.model;
+            wait.appendChild(meta);
+          }
+          memoryNotes.forEach(note => wait.appendChild(note));
+          keepScrolled();
+        }
+      }
+      if (streamError && !streamedFinal) {
+        const partial = streamText.textContent === "Đang trả lời..."
+          ? ""
+          : streamText.textContent;
+        if (!partial && data.reply) {
+          streamText.textContent = data.reply;
+        }
+        const errorNote = document.createElement("div");
+        errorNote.className = "meta";
+        errorNote.textContent = "Lỗi khi tạo câu trả lời: " + streamError;
+        wait.appendChild(errorNote);
+      } else if (streamedFinal) {
+        // The streamed final event already rendered the complete reply.
+      } else if (typeof data.reply === "string") {
+        const memoryNotes = Array.from(wait.querySelectorAll(".memory-result"));
+        wait.innerHTML = render(data.reply);
+        if (data.model) {
+          const meta = document.createElement("div");
+          meta.className = "meta";
+          meta.textContent = data.model;
+          wait.appendChild(meta);
+        }
+        memoryNotes.forEach(note => wait.appendChild(note));
+      }
+    } else {
+      if (!r.ok) throw new Error(data.error || "Yêu cầu thất bại");
+      if (typeof data.reply === "string") {
+        streamText.textContent = "";
+        wait.innerHTML = render(data.reply);
+        if (data.model) {
+          const meta = document.createElement("div");
+          meta.className = "meta";
+          meta.textContent = data.model;
+          wait.appendChild(meta);
+        }
+      }
+    }
     if (data.new) log.innerHTML = "";
     const reply = text === "/new" && data.new ? "" : data.reply || data.error || "(không có phản hồi)";
-    const botMessage = reply ? addMsg("bot", reply, data.model || "") : null;
+    const botMessage = reply ? wait : null;
+    if (!reply) wait.remove();
     if (botMessage) {
       pollMemoryRecent(memorySince, botMessage);
       const memoryResult = data.memory_result;
-      if (memoryResult && memoryResult.intent === "remember" && memoryResult.saved) {
-        const note = document.createElement("div");
-        note.className = "memory-result";
-        note.textContent = "🧠 Đã cập nhật bộ nhớ: " + memoryResult.text;
-        botMessage.appendChild(note);
-      } else if (memoryResult && memoryResult.intent === "forget") {
+      if (memoryResult && memoryResult.intent === "forget") {
         for (const item of memoryResult.deleted || []) {
           const note = document.createElement("div");
           note.className = "memory-result";
@@ -1169,11 +1344,17 @@ async function send(){
     if (data.usage) document.getElementById("usage").textContent = data.usage;
     refreshChats().catch(error => console.error("Không tải được danh sách chat:", error));
   } catch (e) {
-    wait.remove();
-    addMsg("bot", "Lỗi kết nối tới server: " + e);
+    if (streamText.textContent === "Đang trả lời...") {
+      streamText.textContent = "";
+    }
+    const errorNote = document.createElement("div");
+    errorNote.className = "meta";
+    errorNote.textContent = "Lỗi kết nối tới server: " + e;
+    wait.appendChild(errorNote);
   }
   sendBtn.disabled = false;
   box.focus();
+  log.removeEventListener("scroll", trackScroll);
 }
 attachBtn.addEventListener("click", () => pdfFileInput.click());
 pdfFileInput.addEventListener("change", async () => {
