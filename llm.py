@@ -77,7 +77,7 @@ def tool_schemas():
     return schemas
 
 
-def run_openai(client, model, conv, max_rounds=5, allow_tools=True):
+def run_openai(client, model, conv, max_rounds=5, allow_tools=True, on_tool=None):
     schemas = tool_schemas() if allow_tools else None
     total = 0
     for _ in range(max_rounds):
@@ -106,6 +106,8 @@ def run_openai(client, model, conv, max_rounds=5, allow_tools=True):
             ],
         })
         for c in msg.tool_calls:
+            if on_tool:
+                on_tool(c.function.name)
             fn = TOOL_MAP.get(c.function.name)
             try:
                 args = json.loads(c.function.arguments or "{}")
@@ -262,4 +264,142 @@ def ask(gemini_client, openai_clients, messages, text, use_history=True, route_t
             last_error = e
             print(f"  [{provider}/{model}] lỗi, thử model khác: {str(e)[:120]}")
     raise last_error if last_error else Exception("Tất cả model đều thất bại")
+
+
+def ask_stream(gemini_client, openai_clients, messages, text, use_history=True,
+               route_text=None, image=None, model_override=None,
+               include_persistent_context=True, allow_tools=True, project=None,
+               memory_saved=None, summary="", summary_upto=0,
+               memory_intent=None, memory_forget_failed=False,
+               response_mime_type=None):
+    try:
+        context = build_context(project, messages, summary, summary_upto)
+        system_instruction = SYSTEM_INSTRUCTION
+        system_extra = (
+            context["system_extra"] if include_persistent_context else ""
+        )
+        if memory_saved is True:
+            system_extra += "\nHệ thống đã lưu thông tin này, hãy xác nhận ngắn gọn"
+        elif memory_intent == "ordinary" and memory_saved is not True:
+            system_extra += (
+                "\nKhông được nói đã ghi nhận/đã lưu/đã nhớ/đã quên; "
+                "hệ thống tự hiển thị 🧠 khi thật sự lưu."
+            )
+        elif memory_saved is False:
+            system_extra += "\nLưu thất bại, hãy nói thật là chưa lưu được"
+        if memory_intent == "forget" and memory_forget_failed:
+            system_extra += "\nViệc xóa chưa thực hiện được, hãy nói thật là chưa xóa."
+        if system_extra:
+            system_instruction += "\n\n" + system_extra
+
+        if model_override:
+            models = [m for m in MODELS if f"{m[0]}/{m[1]}" == model_override]
+            if not models:
+                raise ValueError(f"Không tìm thấy model: {model_override}")
+        else:
+            models = available_models(route_text or text)
+        if image:
+            models = [m for m in models if m[0] == "gemini"]
+    except Exception as error:
+        yield {"type": "error", "message": str(error)}
+        return
+
+    last_error = None
+    for provider, model in models:
+        reply_parts = []
+        tool_names = []
+        yielded_token = False
+        try:
+            if provider == "gemini":
+                history = to_contents(context["messages"]) if use_history else []
+                config_options = {"system_instruction": system_instruction}
+                if response_mime_type:
+                    config_options["response_mime_type"] = response_mime_type
+                if allow_tools:
+                    config_options["tools"] = TOOLS
+                config = types.GenerateContentConfig(**config_options)
+                chat = gemini_client.chats.create(
+                    model=model, history=history, config=config
+                )
+                message = (
+                    text
+                    if not image
+                    else [
+                        types.Part.from_bytes(data=image[0], mime_type=image[1]),
+                        text,
+                    ]
+                )
+                meta = None
+                for chunk in chat.send_message_stream(message):
+                    meta = getattr(chunk, "usage_metadata", None) or meta
+                    candidates = getattr(chunk, "candidates", None) or []
+                    if not candidates:
+                        continue
+                    content = getattr(candidates[0], "content", None)
+                    for part in getattr(content, "parts", None) or []:
+                        function_call = getattr(part, "function_call", None)
+                        name = getattr(function_call, "name", None)
+                        if name:
+                            tool_names.append(name)
+                            yield {"type": "tool", "name": name}
+                        part_text = getattr(part, "text", None)
+                        if part_text:
+                            yielded_token = True
+                            reply_parts.append(part_text)
+                            yield {"type": "token", "text": part_text}
+                yield {
+                    "type": "final",
+                    "reply": "".join(reply_parts),
+                    "model": f"{provider}/{model}",
+                    "_meta": meta,
+                }
+                return
+
+            if provider in ("groq", "openrouter"):
+                client = openai_clients.get(provider)
+                if not client:
+                    continue
+                hist = context["messages"] if use_history else []
+                conv = to_openai_messages(hist, system_instruction)
+                conv.append({"role": "user", "content": text})
+                tool_names = []
+                reply_text, total = run_openai(
+                    client,
+                    model,
+                    conv,
+                    allow_tools=allow_tools,
+                    on_tool=tool_names.append,
+                )
+                for name in tool_names:
+                    yield {"type": "tool", "name": name}
+                reply_parts.append(reply_text)
+                yield {"type": "token", "text": reply_text}
+                yielded_token = True
+                yield {
+                    "type": "final",
+                    "reply": reply_text,
+                    "model": f"{provider}/{model}",
+                    "_meta": UsageMeta(total),
+                }
+                return
+
+        except Exception as error:
+            last_error = error
+            print(
+                f"  [{provider}/{model}] stream error: "
+                f"{ascii(str(error)[:120])}"
+            )
+            if yielded_token or tool_names:
+                yield {
+                    "type": "error",
+                    "message": str(error),
+                    "partial": "".join(reply_parts),
+                    "model": f"{provider}/{model}",
+                }
+                return
+
+    yield {
+        "type": "error",
+        "message": str(last_error) if last_error else "Tất cả model đều thất bại.",
+    }
 

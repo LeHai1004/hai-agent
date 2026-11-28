@@ -164,6 +164,85 @@ def run_chat_turn(
     return answer, model_key, meta, memory_result
 
 
+def run_chat_turn_stream(
+    gemini_client,
+    openai_clients,
+    messages,
+    prompt,
+    user_text,
+    ask_stream_fn,
+    ask_fn,
+    record_usage_fn,
+    use_history=True,
+    project=None,
+    summary="",
+    summary_upto=0,
+):
+    intent = memory_intent(user_text)
+    memory_result = None
+    memory_saved = None
+    if intent == "remember":
+        remembered_text = _remember_text(user_text)
+        memory_result = save_and_verify(remembered_text)
+        memory_result["intent"] = "remember"
+        memory_result["text"] = remembered_text
+        memory_saved = memory_result["saved"]
+        if memory_saved:
+            yield {"type": "memory", "text": remembered_text}
+    elif intent == "forget":
+        memory_result = _forget_request(
+            gemini_client,
+            openai_clients,
+            user_text,
+            ask_fn,
+            record_usage_fn,
+        )
+
+    streamed_text = []
+    for event in ask_stream_fn(
+        gemini_client,
+        openai_clients,
+        messages,
+        prompt,
+        use_history=use_history,
+        project=project,
+        memory_saved=memory_saved,
+        summary=summary,
+        summary_upto=summary_upto,
+        memory_intent=intent or "ordinary",
+        memory_forget_failed=bool(
+            intent == "forget" and memory_result and memory_result.get("error")
+        ),
+    ):
+        if event["type"] == "token":
+            streamed_text.append(event.get("text", ""))
+            yield event
+        elif event["type"] == "final":
+            answer = event["reply"]
+            if (
+                intent == "remember"
+                and memory_saved is False
+                and _SAVE_CLAIM_RE.search(answer or "")
+            ):
+                error = memory_result["error"] or "Không xác minh được việc lưu."
+                answer = f"Lưu thất bại, chưa lưu được thông tin: {error}"
+            if intent == "forget" and _DELETE_CLAIM_RE.search(answer or ""):
+                answer = "Mình sẽ không khẳng định đã xóa bộ nhớ trong câu trả lời."
+            yield {
+                **event,
+                "reply": answer,
+                "memory_result": memory_result,
+            }
+        elif event["type"] == "error":
+            yield {
+                **event,
+                "partial": event.get("partial", "".join(streamed_text)),
+                "memory_result": memory_result,
+            }
+        else:
+            yield event
+
+
 def schedule_memory_scan(
     gemini_client,
     openai_clients,

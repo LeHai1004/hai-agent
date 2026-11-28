@@ -15,6 +15,7 @@ from urllib.parse import quote
 import tools
 from chat_flow import (
     run_chat_turn,
+    run_chat_turn_stream,
     schedule_memory_scan,
     schedule_thread_summary,
 )
@@ -29,7 +30,8 @@ from pins import (
 )
 from project_workspace import get_workspace_dir
 from dotenv import load_dotenv
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_from_directory
+from flask import stream_with_context
 from transfer import EXPORT_DIR, export_chat, import_chat, list_exports
 from google import genai
 from google.genai import types
@@ -37,7 +39,7 @@ from openai import OpenAI
 from werkzeug.utils import secure_filename
 
 from history import load_history_state, save_history, update_history_summary
-from llm import ask
+from llm import ask, ask_stream
 from memory import (
     InvalidModelJSON,
     MAX_MEMORIES,
@@ -78,8 +80,10 @@ DOWNLOADABLE_WORKSPACE_EXTENSIONS = {".docx", ".md", ".txt"}
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_SIZE + 64 * 1024
 lock = threading.Lock()
 chat_jobs_lock = threading.Lock()
+chat_jobs_condition = threading.Condition(chat_jobs_lock)
 chat_jobs = {}
 active_job_id = None
+CHAT_JOB_TTL = 600
 memory_extraction_jobs = set()
 memory_extraction_jobs_lock = threading.Lock()
 memory_completed_messages = {}
@@ -90,6 +94,37 @@ PROJECTS_DIR = Path("history", "projects")
 CURRENT_PROJECT_PATH = Path("history", "current_project.txt")
 LEGACY_CHAT_DIR = Path("history", "chats")
 CHAT_ID_PATTERN = re.compile(r"\d{8}_\d{4}(?:\d{2}(?:_\d{6})?)?")
+
+
+def _append_chat_event_locked(job, event):
+    payload = dict(event)
+    event_id = job["last_event_id"] + 1
+    job["last_event_id"] = event_id
+    job["events"].append({"id": event_id, "data": payload})
+    if payload["type"] == "memory":
+        job["memory_event_sent"] = True
+    if payload["type"] == "final":
+        job["final_event_sent"] = True
+    return event_id
+
+
+def _publish_chat_event(job_id, event):
+    with chat_jobs_condition:
+        job = chat_jobs.get(job_id)
+        if job is None:
+            return None
+        event_id = _append_chat_event_locked(job, event)
+        chat_jobs_condition.notify_all()
+        return event_id
+
+
+def _prune_chat_jobs_locked(now):
+    for old_id, old_job in list(chat_jobs.items()):
+        if (
+            old_job["status"] == "done"
+            and now - old_job["created_at"] > CHAT_JOB_TTL
+        ):
+            del chat_jobs[old_id]
 
 
 def _load_current_project():
@@ -1625,7 +1660,7 @@ def delete_chat(chat_id):
     return jsonify(ok=True, current_deleted=deleted_current)
 
 
-def _process_chat_message(text):
+def _process_chat_message(text, event_sink=None):
     global current_chat_id, current_extracted_upto
     global current_summary, current_summary_upto, messages
     if text == "/new":
@@ -1861,35 +1896,107 @@ def _process_chat_message(text):
             return {"reply": "Không tìm thấy kết quả nào.", "model": ""}
         prompt = build_prompt(question, results)
         sources = [(r.get("title", ""), r.get("href", "")) for r in results]
-    try:
-        answer, model_key, meta, memory_result = run_chat_turn(
-            gemini_client,
-            openai_clients,
-            messages,
-            prompt,
-            question,
-            ask_fn=ask,
-            record_usage_fn=record_usage,
-            use_history=not sources,
-            project=current_project,
-            summary=current_summary,
-            summary_upto=current_summary_upto,
-        )
-    except Exception as e:
-        return {"reply": f"Lỗi: tất cả model đều thất bại. {e}", "model": ""}
+    stream_error = None
+    if event_sink is None:
+        try:
+            answer, model_key, meta, memory_result = run_chat_turn(
+                gemini_client,
+                openai_clients,
+                messages,
+                prompt,
+                question,
+                ask_fn=ask,
+                record_usage_fn=record_usage,
+                use_history=not sources,
+                project=current_project,
+                summary=current_summary,
+                summary_upto=current_summary_upto,
+            )
+        except Exception as e:
+            return {"reply": f"Lỗi: tất cả model đều thất bại. {e}", "model": ""}
+    else:
+        final_event = None
+        streamed_text = []
+        try:
+            for event in run_chat_turn_stream(
+                gemini_client,
+                openai_clients,
+                messages,
+                prompt,
+                question,
+                ask_stream_fn=ask_stream,
+                ask_fn=ask,
+                record_usage_fn=record_usage,
+                use_history=not sources,
+                project=current_project,
+                summary=current_summary,
+                summary_upto=current_summary_upto,
+            ):
+                if event["type"] == "token":
+                    streamed_text.append(event.get("text", ""))
+                    event_sink(event)
+                elif event["type"] == "final":
+                    final_event = event
+                elif event["type"] == "error":
+                    stream_error = event
+                else:
+                    event_sink(event)
+        except Exception as error:
+            stream_error = {
+                "type": "error",
+                "message": str(error),
+                "partial": "".join(streamed_text),
+            }
+
+        if stream_error:
+            answer = stream_error.get("partial") or "".join(streamed_text)
+            model_key = stream_error.get("model", "")
+            meta = None
+            memory_result = stream_error.get("memory_result")
+            if not answer:
+                result = {
+                    "reply": (
+                        "Lỗi: tất cả model đều thất bại. "
+                        f"{stream_error['message']}"
+                    ),
+                    "model": "",
+                }
+                if memory_result:
+                    result["memory_result"] = memory_result
+                result["_stream_error"] = stream_error["message"]
+                return result
+        elif final_event is not None:
+            answer = final_event["reply"]
+            model_key = final_event["model"]
+            meta = final_event.get("_meta")
+            memory_result = final_event.get("memory_result")
+        else:
+            message = "Luồng model kết thúc mà không có sự kiện final."
+            return {
+                "reply": f"Lỗi: {message}",
+                "model": "",
+                "_stream_error": message,
+            }
+
     saved = answer
+    if stream_error and saved:
+        saved += f"\n\n[Lỗi khi tiếp tục: {stream_error['message']}]"
     if sources:
         saved += "\n\nNguồn:\n" + "\n".join(
             f"[{i}] {t}: {u}" for i, (t, u) in enumerate(sources, 1))
     messages.append({"role": "user", "text": question})
     messages.append({"role": "model", "text": saved})
     save_history(messages)
-    record_usage(model_key, meta)
+    if event_sink is None or (model_key and meta is not None):
+        record_usage(model_key, meta)
     result = {
         "reply": saved,
         "model": model_key,
-        "usage": format_usage(load_usage(), model_key),
     }
+    if model_key:
+        result["usage"] = format_usage(load_usage(), model_key)
+    if stream_error:
+        result["_stream_error"] = stream_error["message"]
     if memory_result:
         result["memory_result"] = memory_result
         if memory_result["intent"] == "remember":
@@ -1906,14 +2013,29 @@ def _process_chat_message(text):
 def _run_chat_job(job_id, text):
     global active_job_id
     confirm_context.job_id = job_id
+    pending_errors = []
+
+    def publish_event(event):
+        if event["type"] == "error":
+            pending_errors.append(event)
+        else:
+            _publish_chat_event(job_id, event)
+
     try:
         with lock:
             messages_before = messages[:]
             workspace_before = _workspace_file_mtimes()
             try:
-                result = _process_chat_message(text)
+                result = _process_chat_message(text, event_sink=publish_event)
             except Exception as e:
                 result = {"reply": f"Lỗi xử lý: {e}", "model": ""}
+                pending_errors.append({"type": "error", "message": str(e)})
+            stream_error = result.pop("_stream_error", None)
+            if stream_error:
+                pending_errors.append({
+                    "type": "error",
+                    "message": stream_error,
+                })
             workspace_after = _workspace_file_mtimes()
             created_files = sorted(
                 filename
@@ -1932,6 +2054,22 @@ def _run_chat_job(job_id, text):
             ):
                 result["reply"] += "\n\nMở sơ đồ: /diagram"
             _save_current_chat()
+            memory_result = result.get("memory_result")
+            if (
+                memory_result
+                and memory_result.get("intent") == "remember"
+                and memory_result.get("saved")
+            ):
+                with chat_jobs_lock:
+                    job = chat_jobs.get(job_id)
+                    memory_event_sent = bool(
+                        job and job.get("memory_event_sent")
+                    )
+                if not memory_event_sent:
+                    _publish_chat_event(job_id, {
+                        "type": "memory",
+                        "text": memory_result.get("text", ""),
+                    })
             if (
                 not result.get("new")
                 and len(messages) == len(messages_before) + 2
@@ -1971,16 +2109,32 @@ def _run_chat_job(job_id, text):
                 )
     except Exception as e:
         result = {"reply": f"Lỗi xử lý: {e}", "model": ""}
+        pending_errors.append({"type": "error", "message": str(e)})
     finally:
         del confirm_context.job_id
-        with chat_jobs_lock:
+        with chat_jobs_condition:
             job = chat_jobs.get(job_id)
             if job is not None:
                 job["result"] = result
                 job["status"] = "done"
                 job["confirmation"] = None
+                if pending_errors:
+                    error_event = pending_errors[-1]
+                    _append_chat_event_locked(job, {
+                        "type": "error",
+                        "message": error_event["message"],
+                    })
+                else:
+                    if not job["final_event_sent"]:
+                        _append_chat_event_locked(job, {
+                            "type": "final",
+                            "reply": result.get("reply", ""),
+                            "model": result.get("model", ""),
+                        })
+                    _append_chat_event_locked(job, {"type": "done"})
             if active_job_id == job_id:
                 active_job_id = None
+            chat_jobs_condition.notify_all()
 
 
 @app.post("/api/chat")
@@ -1993,9 +2147,7 @@ def chat():
         if active_job_id is not None:
             return jsonify(error="Yêu cầu trước vẫn đang xử lý."), 409
         now = time.monotonic()
-        for old_id, old_job in list(chat_jobs.items()):
-            if old_job["status"] == "done" and now - old_job["created_at"] > 600:
-                del chat_jobs[old_id]
+        _prune_chat_jobs_locked(now)
         job_id = uuid.uuid4().hex
         chat_jobs[job_id] = {
             "created_at": now,
@@ -2006,6 +2158,10 @@ def chat():
             "decision": None,
             "decision_event": threading.Event(),
             "result": None,
+            "events": [],
+            "last_event_id": 0,
+            "memory_event_sent": False,
+            "final_event_sent": False,
         }
         active_job_id = job_id
         threading.Thread(
@@ -2014,6 +2170,72 @@ def chat():
     if looks_personal(text):
         response["suggest_pin"] = text
     return jsonify(response), 202
+
+
+@app.get("/events/<request_id>")
+def chat_events(request_id):
+    raw_last_event_id = request.headers.get("Last-Event-ID", "0")
+    try:
+        cursor = int(raw_last_event_id)
+    except ValueError:
+        return jsonify(error="Last-Event-ID phải là số nguyên."), 400
+    if cursor < 0:
+        return jsonify(error="Last-Event-ID không được âm."), 400
+    with chat_jobs_condition:
+        _prune_chat_jobs_locked(time.monotonic())
+        if request_id not in chat_jobs:
+            return jsonify(error="Không tìm thấy yêu cầu chat."), 404
+
+    @stream_with_context
+    def generate():
+        nonlocal cursor
+        while True:
+            with chat_jobs_condition:
+                job = chat_jobs.get(request_id)
+                if job is None:
+                    return
+                pending = [
+                    dict(event)
+                    for event in job["events"]
+                    if event["id"] > cursor
+                ]
+                if not pending:
+                    if job["status"] == "done":
+                        return
+                    notified = chat_jobs_condition.wait(timeout=15)
+                    heartbeat = not notified
+                else:
+                    heartbeat = False
+            if heartbeat:
+                yield ": keep-alive\n\n"
+                continue
+            if not pending:
+                continue
+            for event in pending:
+                if event["id"] <= cursor:
+                    continue
+                cursor = event["id"]
+                payload = json.dumps(
+                    event["data"],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                event_type = event["data"]["type"]
+                yield (
+                    f"id: {cursor}\nevent: {event_type}\n"
+                    f"data: {payload}\n\n"
+                )
+                if event_type in ("done", "error"):
+                    return
+
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/api/chat/status/<request_id>")
