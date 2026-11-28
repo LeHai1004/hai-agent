@@ -16,6 +16,137 @@ MAX_TITLE_LENGTH = 200
 MAX_LANGUAGE_LENGTH = 40
 
 
+class ArtifactVersionConflict(ValueError):
+    pass
+
+
+def _line_body(line):
+    return line.rstrip("\r\n")
+
+
+def _fence_start(line):
+    match = re.match(r"^ {0,3}(`{3,})", _line_body(line))
+    return match.group(1) if match else None
+
+
+def _is_heading(line):
+    return re.match(r"^ {0,3}#{1,6}(?:[ \t]+|$)", _line_body(line)) is not None
+
+
+def _is_list_item(line):
+    return re.match(
+        r"^ {0,3}(?:[-+*][ \t]+|\d{1,9}[.)][ \t]+)",
+        _line_body(line),
+    ) is not None
+
+
+def split_markdown_blocks(content):
+    if not isinstance(content, str):
+        raise ValueError("Nội dung markdown phải là văn bản.")
+    lines = []
+    offset = 0
+    for line in content.splitlines(keepends=True):
+        lines.append((line, offset, offset + len(line)))
+        offset += len(line)
+    if not lines:
+        return []
+
+    raw_blocks = []
+    index = 0
+    while index < len(lines):
+        line, start, end = lines[index]
+        body = _line_body(line)
+        if not body.strip():
+            index += 1
+            continue
+
+        fence = _fence_start(line)
+        if fence:
+            marker = fence[0]
+            marker_length = len(fence)
+            index += 1
+            while index < len(lines):
+                closing = re.match(
+                    rf"^ {{0,3}}{re.escape(marker)}{{{marker_length},}}[ \t]*$",
+                    _line_body(lines[index][0]),
+                )
+                end = lines[index][2]
+                index += 1
+                if closing:
+                    break
+            raw_blocks.append(("code", start, end))
+            continue
+
+        if _is_heading(line):
+            raw_blocks.append(("heading", start, end))
+            index += 1
+            continue
+
+        if _is_list_item(line):
+            index += 1
+            while index < len(lines):
+                next_line = lines[index][0]
+                next_body = _line_body(next_line)
+                if not next_body.strip():
+                    next_index = index
+                    while (
+                        next_index < len(lines)
+                        and not _line_body(lines[next_index][0]).strip()
+                    ):
+                        next_index += 1
+                    if (
+                        next_index < len(lines)
+                        and _is_list_item(lines[next_index][0])
+                    ):
+                        index = next_index
+                        continue
+                    break
+                if _fence_start(next_line) or _is_heading(next_line):
+                    break
+                index += 1
+            end = lines[index - 1][2]
+            raw_blocks.append(("list", start, end))
+            continue
+
+        index += 1
+        while index < len(lines):
+            next_line = lines[index][0]
+            if (
+                not _line_body(next_line).strip()
+                or _fence_start(next_line)
+                or _is_heading(next_line)
+                or _is_list_item(next_line)
+            ):
+                break
+            index += 1
+        end = lines[index - 1][2]
+        raw_blocks.append(("paragraph", start, end))
+
+    if not raw_blocks:
+        return [{
+            "type": "paragraph",
+            "start": 0,
+            "end": len(content),
+            "content": content,
+        }]
+
+    blocks = []
+    for index, (block_type, raw_start, _raw_end) in enumerate(raw_blocks):
+        start = 0 if index == 0 else raw_start
+        end = (
+            raw_blocks[index + 1][1]
+            if index + 1 < len(raw_blocks)
+            else len(content)
+        )
+        blocks.append({
+            "type": block_type,
+            "start": start,
+            "end": end,
+            "content": content[start:end],
+        })
+    return blocks
+
+
 def _project_name(project=None):
     if project is None:
         try:
@@ -234,3 +365,60 @@ def update_artifact(
         return artifact
 
     return update_json(path, None, append_version)
+
+
+def apply_patch(
+    artifact_id,
+    base_version,
+    start,
+    end,
+    new_text,
+    source,
+    project=None,
+):
+    if type(base_version) is not int or base_version < 1:
+        raise ValueError("base_version phải là số nguyên dương.")
+    if type(start) is not int or type(end) is not int:
+        raise ValueError("Vị trí start và end phải là số nguyên.")
+    if not isinstance(new_text, str):
+        raise ValueError("Nội dung thay thế phải là văn bản.")
+    if source not in ("bot", "user"):
+        raise ValueError("Nguồn version phải là 'bot' hoặc 'user'.")
+
+    path = _artifact_path(artifact_id, project)
+    if path is None or path.is_symlink() or not path.is_file():
+        raise FileNotFoundError("Không tìm thấy artifact.")
+    updated = _timestamp()
+
+    def replace_range(artifact):
+        if artifact is None:
+            raise FileNotFoundError("Không tìm thấy artifact.")
+        _validate_artifact(artifact, artifact_id)
+        latest_version = artifact["versions"][-1]["number"]
+        if base_version != latest_version:
+            raise ArtifactVersionConflict(
+                f"Artifact đã đổi sang version {latest_version}; "
+                f"base_version {base_version} đã cũ. Hãy tải lại artifact."
+            )
+        content = artifact["content"]
+        if start < 0 or end < start or end > len(content):
+            raise ValueError(
+                f"Vùng chọn [{start}, {end}) nằm ngoài nội dung "
+                f"dài {len(content)} ký tự."
+            )
+        patched_content = _validate_content(
+            content[:start] + new_text + content[end:]
+        )
+        versions = artifact["versions"]
+        versions.append({
+            "number": latest_version + 1,
+            "content": patched_content,
+            "created": updated,
+            "source": source,
+        })
+        artifact["versions"] = versions[-MAX_VERSIONS:]
+        artifact["content"] = patched_content
+        artifact["updated"] = updated
+        return artifact
+
+    return update_json(path, None, replace_range)

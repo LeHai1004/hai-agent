@@ -13,7 +13,12 @@ from pathlib import Path
 from urllib.parse import quote
 
 import tools
-from artifacts import get_artifact, list_artifacts
+from artifacts import (
+    ArtifactVersionConflict,
+    apply_patch as apply_artifact_patch,
+    get_artifact,
+    list_artifacts,
+)
 from chat_flow import (
     run_chat_turn,
     run_chat_turn_stream,
@@ -1983,6 +1988,116 @@ def api_artifact(artifact_id):
     except ValueError as error:
         return jsonify(error=str(error)), 400
     return jsonify(artifact=artifact)
+
+
+@app.post("/api/artifacts/<artifact_id>/patch")
+def api_artifact_patch(artifact_id):
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify(error="Yêu cầu phải là JSON object."), 400
+    base_version = data.get("base_version")
+    start = data.get("start")
+    end = data.get("end")
+    instruction = data.get("instruction")
+    if (
+        type(base_version) is not int
+        or type(start) is not int
+        or type(end) is not int
+        or not isinstance(instruction, str)
+        or not instruction.strip()
+    ):
+        return jsonify(
+            error="Cần base_version, start, end hợp lệ và instruction không rỗng."
+        ), 400
+
+    with lock:
+        project = current_project
+    try:
+        artifact = get_artifact(artifact_id, project)
+    except FileNotFoundError:
+        return jsonify(error="Không tìm thấy artifact trong project hiện tại."), 404
+    except ValueError as error:
+        return jsonify(error=str(error)), 400
+
+    latest_version = artifact["versions"][-1]["number"]
+    if base_version != latest_version:
+        return jsonify(
+            error=(
+                f"Artifact đã đổi sang version {latest_version}; "
+                f"base_version {base_version} đã cũ. Hãy tải lại artifact."
+            )
+        ), 409
+    content = artifact["content"]
+    if start < 0 or end < start or end > len(content):
+        return jsonify(
+            error=(
+                f"Vùng chọn [{start}, {end}) nằm ngoài nội dung "
+                f"dài {len(content)} ký tự."
+            )
+        ), 400
+
+    context_start = max(0, start - 300)
+    context_end = min(len(content), end + 300)
+    selected_text = content[start:end]
+    context_before = content[context_start:start]
+    context_after = content[end:context_end]
+    artifact_format = (
+        f"code, ngôn ngữ {artifact.get('language', 'không xác định')}"
+        if artifact["type"] == "code"
+        else "Markdown"
+    )
+    prompt = (
+        f"Chỉnh sửa Artifact dạng {artifact_format} theo yêu cầu bên dưới. "
+        "Chỉ trả về nội dung thay thế cho đoạn được chọn, không giải thích. "
+        "Giữ định dạng Markdown và ngôn ngữ của đoạn. "
+        "Nếu đây là code, chỉ trả về code thay thế đúng đoạn đã chọn, "
+        "không bọc thêm ```.\n\n"
+        f"Ngữ cảnh trước:\n{context_before}\n\n"
+        f"ĐOẠN ĐƯỢC CHỌN:\n{selected_text}\n\n"
+        f"Ngữ cảnh sau:\n{context_after}\n\n"
+        f"Yêu cầu: {instruction.strip()}"
+    )
+    try:
+        replacement, _model, _meta = ask(
+            gemini_client,
+            openai_clients,
+            [],
+            prompt,
+            use_history=False,
+            route_text=instruction,
+            include_persistent_context=False,
+            allow_tools=False,
+            project=project,
+        )
+    except Exception as error:
+        return jsonify(error=f"Không thể sửa đoạn Artifact: {error}"), 502
+    if not isinstance(replacement, str) or not replacement.strip():
+        return jsonify(
+            error="Model trả nội dung thay thế rỗng; Artifact chưa được thay đổi."
+        ), 502
+
+    try:
+        updated = apply_artifact_patch(
+            artifact_id,
+            base_version,
+            start,
+            end,
+            replacement,
+            "bot",
+            project=project,
+        )
+    except ArtifactVersionConflict as error:
+        return jsonify(error=str(error)), 409
+    except FileNotFoundError:
+        return jsonify(error="Không tìm thấy artifact trong project hiện tại."), 404
+    except ValueError as error:
+        return jsonify(error=str(error)), 400
+    return jsonify(
+        version=updated["versions"][-1]["number"],
+        content=updated["content"],
+        start=start,
+        end_moi=start + len(replacement),
+    )
 
 
 @app.post("/projects/new")
