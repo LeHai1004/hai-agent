@@ -13,12 +13,14 @@ from pathlib import Path
 from urllib.parse import quote
 
 import tools
+from artifacts import get_artifact, list_artifacts
 from chat_flow import (
     run_chat_turn,
     run_chat_turn_stream,
     schedule_memory_scan,
     schedule_thread_summary,
 )
+from tools.artifact import set_artifact_handler
 from config import MEMORY_BACKGROUND_SCAN
 from pins import (
     add_pin,
@@ -1767,6 +1769,29 @@ def projects():
         return jsonify(projects=_list_projects(), current=current_project)
 
 
+@app.get("/api/artifacts")
+def api_artifacts():
+    with lock:
+        project = current_project
+    try:
+        return jsonify(artifacts=list_artifacts(project))
+    except ValueError as error:
+        return jsonify(error=str(error)), 400
+
+
+@app.get("/api/artifacts/<artifact_id>")
+def api_artifact(artifact_id):
+    with lock:
+        project = current_project
+    try:
+        artifact = get_artifact(artifact_id, project)
+    except FileNotFoundError:
+        return jsonify(error="Không tìm thấy artifact trong project hiện tại."), 404
+    except ValueError as error:
+        return jsonify(error=str(error)), 400
+    return jsonify(artifact=artifact)
+
+
 @app.post("/projects/new")
 def new_project():
     data = request.get_json(silent=True)
@@ -1841,7 +1866,7 @@ def delete_chat(chat_id):
     return jsonify(ok=True, current_deleted=deleted_current)
 
 
-def _process_chat_message(text, event_sink=None):
+def _process_chat_message(text, event_sink=None, artifact_refs=None):
     global current_chat_id, current_extracted_upto
     global current_summary, current_summary_upto, messages
     if text == "/new":
@@ -2160,9 +2185,14 @@ def _process_chat_message(text, event_sink=None):
             }
 
     saved = answer
+    if artifact_refs:
+        saved = "\n".join(
+            f"Artifact: {artifact['title']} (id: {artifact['id']})"
+            for artifact in artifact_refs
+        )
     if stream_error and saved:
         saved += f"\n\n[Lỗi khi tiếp tục: {stream_error['message']}]"
-    if sources:
+    if sources and not artifact_refs:
         saved += "\n\nNguồn:\n" + "\n".join(
             f"[{i}] {t}: {u}" for i, (t, u) in enumerate(sources, 1))
     messages.append({"role": "user", "text": question})
@@ -2195,6 +2225,7 @@ def _run_chat_job(job_id, text):
     global active_job_id
     confirm_context.job_id = job_id
     pending_errors = []
+    artifact_refs = []
 
     def publish_event(event):
         if event["type"] == "error":
@@ -2202,12 +2233,26 @@ def _run_chat_job(job_id, text):
         else:
             _publish_chat_event(job_id, event)
 
+    def publish_artifact(artifact):
+        artifact_refs.append(artifact)
+        _publish_chat_event(job_id, {
+            "type": "artifact",
+            "id": artifact["id"],
+            "title": artifact["title"],
+            "artifact_type": artifact["artifact_type"],
+        })
+
+    previous_artifact_handler = set_artifact_handler(publish_artifact)
     try:
         with lock:
             messages_before = messages[:]
             workspace_before = _workspace_file_mtimes()
             try:
-                result = _process_chat_message(text, event_sink=publish_event)
+                result = _process_chat_message(
+                    text,
+                    event_sink=publish_event,
+                    artifact_refs=artifact_refs,
+                )
             except Exception as e:
                 result = {"reply": f"Lỗi xử lý: {e}", "model": ""}
                 pending_errors.append({"type": "error", "message": str(e)})
@@ -2292,6 +2337,7 @@ def _run_chat_job(job_id, text):
         result = {"reply": f"Lỗi xử lý: {e}", "model": ""}
         pending_errors.append({"type": "error", "message": str(e)})
     finally:
+        set_artifact_handler(previous_artifact_handler)
         del confirm_context.job_id
         with chat_jobs_condition:
             job = chat_jobs.get(job_id)

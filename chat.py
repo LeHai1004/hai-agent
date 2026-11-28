@@ -18,6 +18,7 @@ from pdfread import parse_read_command, read_pdf_page
 from img import ask_image
 from filechat import ask_file
 from chat_flow import run_chat_turn, schedule_memory_scan, schedule_thread_summary
+from tools.artifact import set_artifact_handler
 
 load_dotenv()
 
@@ -252,21 +253,33 @@ def main():
                         print()
                         continue
         try:
-            answer, model_key, meta, memory_result = run_chat_turn(
-                gemini_client,
-                openai_clients,
-                messages,
-                prompt,
-                question,
-                ask_fn=ask,
-                record_usage_fn=record_usage,
-                use_history=not sources,
-                summary=summary_state["text"],
-                summary_upto=summary_state["upto"],
+            created_artifacts = []
+            previous_artifact_handler = set_artifact_handler(
+                created_artifacts.append
             )
+            try:
+                answer, model_key, meta, memory_result = run_chat_turn(
+                    gemini_client,
+                    openai_clients,
+                    messages,
+                    prompt,
+                    question,
+                    ask_fn=ask,
+                    record_usage_fn=record_usage,
+                    use_history=not sources,
+                    summary=summary_state["text"],
+                    summary_upto=summary_state["upto"],
+                )
+            finally:
+                set_artifact_handler(previous_artifact_handler)
+            if created_artifacts:
+                answer = "\n".join(
+                    f"Artifact: {artifact['title']} (id: {artifact['id']})"
+                    for artifact in created_artifacts
+                )
             messages.append({"role": "user", "text": question})
             saved = answer
-            if sources:
+            if sources and not created_artifacts:
                 saved += "\n\nNguồn:\n" + "\n".join(
                     f"[{i}] {t}: {u}" for i, (t, u) in enumerate(sources, 1)
                 )
