@@ -28,7 +28,11 @@ SYSTEM_INSTRUCTION = (
     "Không tự ghi nhớ hoặc hứa sẽ lưu thông tin. Không khẳng định đã lưu hoặc đã xóa "
     "bộ nhớ nếu chỉ dẫn hệ thống không xác nhận trạng thái đó. Khi người dùng yêu cầu "
     "quên thông tin, không nói đã quên hoặc đã xóa. Khi người dùng yêu cầu nhớ điều gì, "
-    "chỉ trả lời tự nhiên thật ngắn."
+    "chỉ trả lời tự nhiên thật ngắn. "
+    "Khi người dùng nhờ viết tài liệu, bài hướng dẫn hoặc đoạn code/hàm để đọc, "
+    "sao chép hoặc chỉnh sửa lại, dùng create_artifact dù họ không nói chữ 'artifact'. "
+    "Chỉ dùng write_file khi người dùng yêu cầu rõ lưu nội dung vào workspace hoặc "
+    "thư mục dự án. Câu trả lời ngắn hoặc giải thích thông thường thì trả lời trong chat."
 )
 
 def to_contents(messages):

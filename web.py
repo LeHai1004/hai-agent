@@ -713,6 +713,8 @@ body.panel-resizing #panel-frame{pointer-events:none}
 .pin-suggestion button{padding:4px 8px;font-size:.78rem;border-radius:6px}
 .pin-suggestion-status{color:#aeb4c0;font-size:.8rem}
 .memory-result{color:#8b8f99;font-size:.8rem;margin-top:6px}
+.artifact-card{display:block;margin-top:8px;padding:8px 12px;border:1px solid #3a3d45;border-radius:8px;background:#24262b;color:#9cc5ff;text-align:left}
+.artifact-card:hover{background:#2e3036}
 .export-list{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
 .export-list button{padding:6px 10px;font-size:.85rem}
 .export-list-status{color:#aeb4c0;font-size:.8rem;margin-top:8px}
@@ -771,6 +773,7 @@ const projectSelect = document.getElementById("project-select");
 const attachBtn = document.getElementById("attach");
 const pdfFileInput = document.getElementById("pdf-file");
 let pendingImagePreview = null;
+const confirmationCards = new Map();
 const panelWidthKey = "hai-agent-panel-width";
 function setPanelWidth(width){
   const maxWidth = Math.max(300, window.innerWidth * 0.7);
@@ -849,6 +852,40 @@ function render(t){
         return inline(line);
       }).join("<br>")).join("");
 }
+function addArtifactCard(container, id, title){
+  const card = document.createElement("button");
+  card.type = "button";
+  card.className = "artifact-card";
+  card.dataset.artifactId = id;
+  card.textContent = "📄 " + title;
+  card.addEventListener("click", () => {
+    openPanel(`/artifact-view/${encodeURIComponent(id)}`, title);
+  });
+  container.appendChild(card);
+  return card;
+}
+function artifactReferences(text){
+  const pattern = /Artifact: ([\\s\\S]*?) \\(id: ([0-9a-f]{32})\\)/g;
+  const references = Array.from(text.matchAll(pattern));
+  if (!references.length || references.map(match => match[0]).join("\\n") !== text) {
+    return null;
+  }
+  return references.map(match => ({id: match[2], title: match[1]}));
+}
+function renderBotReply(container, text){
+  container.replaceChildren();
+  const references = artifactReferences(text);
+  if (references) {
+    const seenIds = new Set();
+    references.forEach(reference => {
+      if (seenIds.has(reference.id)) return;
+      seenIds.add(reference.id);
+      addArtifactCard(container, reference.id, reference.title);
+    });
+  } else {
+    container.innerHTML = render(text);
+  }
+}
 function addMsg(role, text, meta, imageUrl){
   const d = document.createElement("div");
   d.className = "msg " + (role === "user" ? "user" : "bot");
@@ -861,7 +898,7 @@ function addMsg(role, text, meta, imageUrl){
       img.src = imageUrl;
       d.appendChild(img);
     }
-  } else d.innerHTML = render(text);
+  } else renderBotReply(d, text);
   if (meta){ const m = document.createElement("div"); m.className = "meta"; m.textContent = meta; d.appendChild(m); }
   log.appendChild(d);
   log.scrollTop = log.scrollHeight;
@@ -977,6 +1014,9 @@ function addExportButtons(message, exports){
   message.appendChild(container);
 }
 function addConfirmation(requestId, confirmation){
+  const confirmationKey = `${requestId}:${confirmation.id}`;
+  const existing = confirmationCards.get(confirmationKey);
+  if (existing) return existing;
   const card = document.createElement("div");
   card.className = "msg bot confirmation";
   const prompt = document.createElement("div");
@@ -1021,6 +1061,7 @@ function addConfirmation(requestId, confirmation){
   card.append(prompt, actions, status);
   log.appendChild(card);
   log.scrollTop = log.scrollHeight;
+  confirmationCards.set(confirmationKey, card);
   return card;
 }
 async function waitForChat(requestId){
@@ -1036,7 +1077,13 @@ async function waitForChat(requestId){
       );
     }
     if (state.status === "done") {
-      confirmations.forEach(card => card.remove());
+      confirmations.forEach((card, confirmationId) => {
+        card.remove();
+        const key = `${requestId}:${confirmationId}`;
+        if (confirmationCards.get(key) === card) {
+          confirmationCards.delete(key);
+        }
+      });
       return state.result;
     }
     await new Promise(resolve => setTimeout(resolve, 300));
@@ -1148,6 +1195,18 @@ async function send(){
     let data = accepted;
     let streamedFinal = null;
     let streamError = null;
+    const artifactCards = [];
+    const artifactIds = new Set();
+    const restoreArtifactCards = () => {
+      const present = new Set(Array.from(
+        wait.querySelectorAll(".artifact-card")
+      ).map(card => card.dataset.artifactId));
+      artifactCards.forEach(card => {
+        if (present.has(card.dataset.artifactId)) return;
+        wait.appendChild(card);
+        present.add(card.dataset.artifactId);
+      });
+    };
     if (accepted.pending && accepted.request_id) {
       const requestId = accepted.request_id;
       const polledResult = waitForChat(requestId).catch(error => ({pollError:error}));
@@ -1211,13 +1270,29 @@ async function send(){
               console.error("SSE memory event không hợp lệ:", error);
             }
           });
+          source.addEventListener("artifact", event => {
+            try {
+              const payload = JSON.parse(event.data);
+              if (!payload.id || artifactIds.has(payload.id)) return;
+              artifactIds.add(payload.id);
+              const card = addArtifactCard(wait, payload.id, payload.title || "Artifact");
+              artifactCards.push(card);
+              openPanel(
+                `/artifact-view/${encodeURIComponent(payload.id)}`,
+                payload.title || "Artifact"
+              );
+              keepScrolled();
+            } catch (error) {
+              console.error("SSE artifact không hợp lệ:", error);
+            }
+          });
           source.addEventListener("final", event => {
             try {
               streamedFinal = JSON.parse(event.data);
               const memoryNotes = Array.from(
                 wait.querySelectorAll(".memory-result")
               );
-              wait.innerHTML = render(streamedFinal.reply || "");
+              renderBotReply(wait, streamedFinal.reply || "");
               if (streamedFinal.model) {
                 const meta = document.createElement("div");
                 meta.className = "meta";
@@ -1225,6 +1300,7 @@ async function send(){
                 wait.appendChild(meta);
               }
               memoryNotes.forEach(note => wait.appendChild(note));
+              restoreArtifactCards();
               keepScrolled();
             } catch (error) {
               console.error("SSE final event không hợp lệ:", error);
@@ -1265,7 +1341,7 @@ async function send(){
         if (typeof polled.reply === "string" && polled.reply !== streamedFinal.reply) {
           data.reply = polled.reply;
           const memoryNotes = Array.from(wait.querySelectorAll(".memory-result"));
-          wait.innerHTML = render(data.reply);
+          renderBotReply(wait, data.reply);
           if (data.model) {
             const meta = document.createElement("div");
             meta.className = "meta";
@@ -1273,6 +1349,7 @@ async function send(){
             wait.appendChild(meta);
           }
           memoryNotes.forEach(note => wait.appendChild(note));
+          restoreArtifactCards();
           keepScrolled();
         }
       }
@@ -1291,7 +1368,7 @@ async function send(){
         // The streamed final event already rendered the complete reply.
       } else if (typeof data.reply === "string") {
         const memoryNotes = Array.from(wait.querySelectorAll(".memory-result"));
-        wait.innerHTML = render(data.reply);
+        renderBotReply(wait, data.reply);
         if (data.model) {
           const meta = document.createElement("div");
           meta.className = "meta";
@@ -1299,18 +1376,20 @@ async function send(){
           wait.appendChild(meta);
         }
         memoryNotes.forEach(note => wait.appendChild(note));
+        restoreArtifactCards();
       }
     } else {
       if (!r.ok) throw new Error(data.error || "Yêu cầu thất bại");
       if (typeof data.reply === "string") {
         streamText.textContent = "";
-        wait.innerHTML = render(data.reply);
+        renderBotReply(wait, data.reply);
         if (data.model) {
           const meta = document.createElement("div");
           meta.className = "meta";
           meta.textContent = data.model;
           wait.appendChild(meta);
         }
+        restoreArtifactCards();
       }
     }
     if (data.new) log.innerHTML = "";
@@ -1641,6 +1720,120 @@ def vis_play():
 @app.get("/vis-view")
 def vis_view():
     return send_from_directory(str(get_workspace_dir()), "vis.html")
+
+
+@app.get("/artifact-view/<artifact_id>")
+def artifact_view(artifact_id):
+    with lock:
+        project = current_project
+    try:
+        artifact = get_artifact(artifact_id, project)
+    except FileNotFoundError:
+        return Response("Không tìm thấy artifact trong project hiện tại.", status=404)
+    except ValueError as error:
+        return Response(str(error), status=400)
+
+    title = html.escape(artifact["title"], quote=True)
+    language = html.escape(artifact.get("language", "text"), quote=True)
+    source = html.escape(artifact["content"], quote=False)
+    if artifact["type"] == "markdown":
+        content = '<main id="artifact-content" class="markdown-content"></main>'
+        content_script = (
+            "document.getElementById('artifact-content').innerHTML="
+            "render(document.getElementById('artifact-source').value);"
+        )
+    else:
+        content = (
+            '<main class="code-content"><div class="language-label">'
+            + language
+            + '</div><pre><code>'
+            + source
+            + "</code></pre></main>"
+        )
+        content_script = ""
+    page = (
+        "<!DOCTYPE html><html lang=\"vi\"><head><meta charset=\"UTF-8\">"
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        "<title>"
+        + title
+        + "</title><style>"
+        "*{box-sizing:border-box}body{margin:0;padding:12px;height:100vh;"
+        "display:flex;flex-direction:column;gap:10px;background:#1b1c1f;"
+        "color:#e8e8ea;font-family:system-ui,sans-serif}.toolbar{display:flex;"
+        "align-items:center;gap:8px;min-height:36px}.toolbar h1{font-size:1rem;"
+        "font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"
+        "flex:1;margin:0}.toolbar button{border:0;border-radius:6px;padding:6px 10px;"
+        "background:#2e3036;color:#e8e8ea;cursor:pointer;white-space:nowrap}"
+        ".toolbar button:hover{background:#3a3d45}.status{color:#8b8f99;"
+        "font-size:.78rem;min-height:1em}.markdown-content,.code-content{flex:1;"
+        "min-height:0;overflow:auto;line-height:1.6;overflow-wrap:anywhere}"
+        ".code-content{position:relative}.language-label{position:sticky;top:0;"
+        "z-index:1;width:fit-content;margin-left:auto;padding:3px 8px;"
+        "border-radius:0 0 0 6px;background:#24262b;color:#aeb4c0;font-size:.75rem}"
+        "pre{margin:0;padding:14px;background:#111214;border-radius:8px;"
+        "overflow:auto;white-space:pre;tab-size:4}code{font-family:Consolas,"
+        "'Courier New',monospace;font-size:.9rem}.markdown-content code{"
+        "background:#111214;padding:1px 5px;border-radius:4px}h3,h4,h5{"
+        "font-weight:700;line-height:1.3;margin:8px 0 4px}h3{font-size:1.15rem}"
+        "h4{font-size:1.08rem}h5{font-size:1rem}hr{border:0;border-top:1px solid "
+        "#555;opacity:.6;margin:8px 0}a{color:#7cb2ff}"
+        "</style></head><body><header class=\"toolbar\"><h1>"
+        + title
+        + '</h1><button id="copy" type="button">Sao chép</button>'
+        '<button id="download" type="button">Tải về</button></header>'
+        '<div id="status" class="status" aria-live="polite"></div>'
+        '<textarea id="artifact-source" hidden>'
+        + source
+        + "</textarea>"
+        + content
+        + "<script>"
+        "function render(t){"
+        'const esc=s=>s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");'
+        'const inline=line=>line.replace(/`([^`]+)`/g,"<code>$1</code>")'
+        '.replace(/\\*\\*([^*]+)\\*\\*/g,"<b>$1</b>")'
+        '.replace(/(^|[\\s:])\\/bilingual\\b/g,\'$1<a href="/bilingual">/bilingual</a>\')'
+        '.replace(/(^|[\\s:])\\/diagram\\b/g,\'$1<a href="/diagram">/diagram</a>\')'
+        '.replace(/(^|[\\s:])\\/pdfview\\/(\\d+)\\b/g,\'$1<a href="/pdfview/$2">/pdfview/$2</a>\')'
+        '.replace(/(^|[\\s:])\\/(vis-play|vis-view)\\b/g,\'$1<a href="/$2">/$2</a>\')'
+        '.replace(/(^|[\\s:])\\/download\\/([^\\s<"\']+)/g,\'$1<a href="/download/$2">/download/$2</a>\')'
+        '.replace(/(^|[\\s:])\\/files\\/([^\\s<"\']+)/g,\'$1<a href="/files/$2">/files/$2</a>\')'
+        '.replace(/(https?:\\/\\/[^\\s<"\']+)/g,\'<a href="$1" target="_blank" rel="noopener">$1</a>\');'
+        'return esc(t).split("```").map((p,i)=>i%2?'
+        '"<pre><code>"+p.replace(/^[a-zA-Z0-9]*\\n/,"")+"</code></pre>":'
+        'p.split("\\n").map(line=>{const heading=line.match(/^(#{1,3}) (.+)$/);'
+        'if(heading){const level=2+heading[1].length;'
+        'return `<h${level}>${inline(heading[2])}</h${level}>`;}'
+        'if(line==="---")return "<hr>";return inline(line);}).join("<br>")).join("");}'
+        + content_script
+        + "const source=document.getElementById('artifact-source').value;"
+        "const status=document.getElementById('status');"
+        "document.getElementById('copy').addEventListener('click',async()=>{"
+        "try{await navigator.clipboard.writeText(source);status.textContent='Đã sao chép.';}"
+        "catch(error){status.textContent='Không thể sao chép: '+error.message;}});"
+        "document.getElementById('download').addEventListener('click',()=>{"
+        "const type="
+        + json.dumps(artifact["type"])
+        + ";const language="
+        + json.dumps(artifact.get("language", "")).replace("<", "\\u003c")
+        + ";const title="
+        + json.dumps(artifact["title"]).replace("<", "\\u003c")
+        + ";const extensions={python:'py',py:'py',javascript:'js',js:'js',"
+        "typescript:'ts',ts:'ts',jsx:'jsx',tsx:'tsx',java:'java',c:'c',"
+        "cpp:'cpp','c++':'cpp',csharp:'cs','c#':'cs',go:'go',rust:'rs',"
+        "ruby:'rb',php:'php',html:'html',css:'css',json:'json',sql:'sql',"
+        "bash:'sh',shell:'sh',sh:'sh',powershell:'ps1',yaml:'yml',"
+        "kotlin:'kt',swift:'swift',r:'r',markdown:'md'};"
+        "const normalized=language.trim().toLowerCase();"
+        "const extension=type==='markdown'?'md':(extensions[normalized]||"
+        "normalized.replace(/[^a-z0-9]+/g,'')||'txt');"
+        "const base=title.replace(/[\\\\/:*?\"<>|]+/g,'_').trim()||'artifact';"
+        "const url=URL.createObjectURL(new Blob([source],{type:'text/plain;charset=utf-8'}));"
+        "const link=document.createElement('a');link.href=url;"
+        "link.download=base+'.'+extension;link.click();"
+        "setTimeout(()=>URL.revokeObjectURL(url),1000);});"
+        "</script></body></html>"
+    )
+    return Response(page, mimetype="text/html")
 
 
 @app.get("/diagram")
@@ -2262,6 +2455,7 @@ def _run_chat_job(job_id, text):
                     "type": "error",
                     "message": stream_error,
                 })
+            original_reply = result.get("reply")
             workspace_after = _workspace_file_mtimes()
             created_files = sorted(
                 filename
@@ -2279,6 +2473,20 @@ def _run_chat_job(job_id, text):
                 and isinstance(result.get("reply"), str)
             ):
                 result["reply"] += "\n\nMở sơ đồ: /diagram"
+            if (
+                result.get("reply") != original_reply
+                and len(messages) == len(messages_before) + 2
+                and messages[:-2] == messages_before
+                and messages[-2].get("role") == "user"
+                and messages[-1].get("role") == "model"
+                and messages[-1].get("text") == original_reply
+            ):
+                messages[-1]["text"] = result["reply"]
+                save_history(
+                    messages,
+                    summary=current_summary,
+                    summary_upto=current_summary_upto,
+                )
             _save_current_chat()
             memory_result = result.get("memory_result")
             if (

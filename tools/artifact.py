@@ -24,7 +24,7 @@ def create_artifact(
     content: str,
     language: Optional[str] = None,
 ) -> str:
-    """Create a long, editable Markdown document or code artifact. Do NOT use for short answers; answer those directly. type must be markdown or code; provide language for code when known."""
+    """Create an editable document, guide, or code/function for the user to read, copy, or revise. Use for writing requests even if the user does not say 'artifact'. Do not use for short answers or ordinary explanations; reply in chat. Use write_file only when the user explicitly asks to save content in the workspace or project directory. type must be markdown or code; provide language for code when known."""
     artifact = save_artifact(title, type, content, language)
     info = {
         "id": artifact["id"],
